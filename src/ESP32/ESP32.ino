@@ -3,40 +3,11 @@
 #include <SimpleFOC.h>
 #include <math.h>
 
+// Get menu config and add extra config here.
+#include "menu_config.h"
 
-
-#define RXD2 16
-#define TXD2 17
-
-#define VOLUME_NOTCHES 40
-#define VOLUME_TORQUE 0.3
-#define VOLUME_BUILDUP 0.8
-#define VOLUME_ID 0
-
-#define MENU_NOTCHES 4
-#define MENU_TORQUE 1.0
-#define MENU_BUILDUP 0.8
-#define MENU_ID 1
-#define IDLE_TIMEOUT 5 // Minutes until idle
-
-#define MEDIA_NOTCHES 20
-#define MEDIA_TORQUE 0.8
-#define MEDIA_BUILDUP 0.8
-#define MEDIA_ID 2
-
-#define DISCORD_NOTCHES 3
-#define DISCORD_TORQUE 0.5
-#define DISCORD_BUILDUP 0.7
-#define DISCORD_ID 3
-int discord_choice = 0; // Normal 0, mute 1, deafen 2.
-
-#define BRIGHT_NOTCHES 20
-#define BRIGHT_TORQUE 0.4
-#define BRIGHT_BUILDUP 0.4
-#define BRIGHT_ID 4
-
-// Menu choices listed in order from top -> clockwise
-const int CHOICES[] = {VOLUME_ID, BRIGHT_ID, MEDIA_ID, DISCORD_ID};
+// Get ESP32 pin config
+#include "pin_config.h"
 
 
 // Encoder
@@ -48,32 +19,36 @@ TFT_eSPI tft = TFT_eSPI();
 // SimpleFOC
 BLDCMotor motor = BLDCMotor(7);   // set correct pole pairs
 BLDCDriver3PWM driver = BLDCDriver3PWM(
-  26,  // IN1
-  32,  // IN2
-  33,  // IN3
-  25   // EN
+  IN1,  // IN1
+  IN2,  // IN2
+  IN3,  // IN3
+  EN   // EN
 );
 
-// Button
-#define BUTTON_PIN 19
+// Button state
 bool last_state = HIGH;
 
+// For drawing indents
 const int cx = 120;        // center x
 const int cy = 120;        // center y
 const int radius = 120;    // distance from center
 const int lineLength = 7;  // length of each line
 
+// Variable setup for encoder and motor
 float currentPos = 0;   // Current encoder position
 float max_torque = 0.3; // Define some torque values, changed later...
 float torque_build_up = 0.8;
 int current_choice = 0;
 
+// Variable setup for screen
 bool display_status = true; // On/off
+bool take_input = false;
 int last_activity = 0;
 int current_ui_id = -1;
 int new_ui_id = 0;
 int n_lines = 40;
-bool take_input = false;
+int discord_choice = 0; // Normal 0, mute 1, deafen 2.
+const int CHOICES[] = {VOLUME_ID, BRIGHT_ID, MEDIA_ID, DISCORD_ID}; // Menu choices listed in order from top -> clockwise
 
 void setup() {
 
@@ -82,7 +57,7 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);  // use internal pull-up
 
   // Setup encoder
-  Wire.begin(21, 22);   // SDA = GPIO21, SCL = GPIO22
+  Wire.begin(ENCODER_SDA, ENCODER_SCL);
   encoder.init();
   
   // Setup motor driver
@@ -102,8 +77,8 @@ void setup() {
   motor.initFOC();
 
   // Display blacklight pins
-  pinMode(27, OUTPUT);  // BLK-pin
-  digitalWrite(27, HIGH);
+  pinMode(BL_PIN, OUTPUT);  // BLK-pin
+  digitalWrite(BL_PIN), HIGH);
 
   // Setup screen
   tft.init();
@@ -445,11 +420,11 @@ void setDisplay(bool onoff) {
   display_status = onoff;
 
   if ( onoff) {
-    digitalWrite(27, HIGH);
+    digitalWrite(BL_PIN, HIGH);
     return;
   }
 
-  digitalWrite(27, LOW);
+  digitalWrite(BL_PIN, LOW);
 }
 
 
