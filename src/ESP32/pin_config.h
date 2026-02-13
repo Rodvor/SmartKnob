@@ -15,6 +15,12 @@
 #define ENCODER_SDA 21
 #define ENCODER_SCL 22
 
+// Touch
+#define TP_SDA 19
+#define TP_SCL 18
+#define TP_INT 34
+#define TP_RST 23
+
 // Most screen configs in /Arduino/libraries/TFT_eSPI/User_Setup.h
 #define BLK_PIN 2 // Screen on/off stuff
 
