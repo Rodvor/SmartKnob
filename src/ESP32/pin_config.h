@@ -3,7 +3,7 @@
 
 // Leonardo connection pins
 #define RXD2 14
-#define TXD2 12
+#define TXD2 13
 
 // SimpleFOC ports
 #define EN 25
