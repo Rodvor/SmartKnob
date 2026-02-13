@@ -131,7 +131,6 @@ void loop() {
     // Check if menu has been initialized and ready for input
     float torque = calc_torque(pos);
     motor.move(torque);
-    Serial.println(torque);
 
   } else {
     // Move motor to menu default position
@@ -145,8 +144,7 @@ void loop() {
     // Apply torque
     float torque = torque_to_angle(pos, target_angle); 
     motor.move(torque);
-    Serial.println(torque);
-    
+
     // If we have reached close enough -> menu initialized
     if ( abs(((target_angle - PI/2) - pos)) < 0.05 ) {
       take_input = true;
