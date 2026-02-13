@@ -45,7 +45,7 @@ bool display_status = true; // On/off
 bool take_input = false;
 int last_activity = 0;
 int current_ui_id = -1;
-int new_ui_id = 0;
+int new_ui_id = VOLUME_ID;
 int n_lines = 40;
 int discord_choice = 0; // Normal 0, mute 1, deafen 2.
 const int CHOICES[] = {VOLUME_ID, BRIGHT_ID, MEDIA_ID, DISCORD_ID}; // Menu choices listed in order from top -> clockwise
@@ -71,14 +71,15 @@ void setup() {
   // Torque control 
   motor.controller = MotionControlType::torque;
   motor.torque_controller = TorqueControlType::voltage;
+  //motor.sensor_direction = Direction::CCW;
 
   motor.voltage_limit = 3.0;
   motor.init();
   motor.initFOC();
 
   // Display blacklight pins
-  pinMode(BL_PIN, OUTPUT);  // BLK-pin
-  digitalWrite(BL_PIN), HIGH);
+  pinMode(BLK_PIN, OUTPUT);  // BLK-pin
+  digitalWrite(BLK_PIN, HIGH);
 
   // Setup screen
   tft.init();
@@ -130,6 +131,7 @@ void loop() {
     // Check if menu has been initialized and ready for input
     float torque = calc_torque(pos);
     motor.move(torque);
+    Serial.println(torque);
 
   } else {
     // Move motor to menu default position
@@ -143,6 +145,7 @@ void loop() {
     // Apply torque
     float torque = torque_to_angle(pos, target_angle); 
     motor.move(torque);
+    Serial.println(torque);
     
     // If we have reached close enough -> menu initialized
     if ( abs(((target_angle - PI/2) - pos)) < 0.05 ) {
@@ -420,11 +423,11 @@ void setDisplay(bool onoff) {
   display_status = onoff;
 
   if ( onoff) {
-    digitalWrite(BL_PIN, HIGH);
+    digitalWrite(BLK_PIN, HIGH);
     return;
   }
 
-  digitalWrite(BL_PIN, LOW);
+  digitalWrite(BLK_PIN, LOW);
 }
 
 
