@@ -195,6 +195,9 @@ void handleCommand(String c) {
   else if (c.indexOf("play-pause") != -1) {
     pauseMedia();
   }
+  else if (c.indexOf("disconnect") != -1) {
+    clickAltShiftF13();
+  }
 }
 
 void volumeUp() {
@@ -224,6 +227,14 @@ void clickF13() {
 
 // Deafen
 void clickAltF13() {
+  BootKeyboard.press(KEY_LEFT_ALT);
+  BootKeyboard.press(KEY_F13);
+  delay(5);
+  BootKeyboard.releaseAll();
+}
+
+void clickAltShiftF13() {
+  BootKeyboard.press(KEY_LEFT_SHIFT);
   BootKeyboard.press(KEY_LEFT_ALT);
   BootKeyboard.press(KEY_F13);
   delay(5);

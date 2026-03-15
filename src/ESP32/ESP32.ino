@@ -125,7 +125,7 @@ void doTapAction() {
   } else if (current_ui_id == MEDIA_ID) {
     sendCmd("<play-pause>");
   } else if (current_ui_id == DISCORD_ID) {
-    sendCmd("<mute>");
+    sendCmd("<disconnect>");
   }
   // BRIGHT_ID: do nothing
 }
