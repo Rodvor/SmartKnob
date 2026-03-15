@@ -192,6 +192,9 @@ void handleCommand(String c) {
   else if (c.indexOf("bright-down") != -1) {
     clickF14();
   }
+  else if (c.indexOf("play-pause") != -1) {
+    pauseMedia();
+  }
 }
 
 void volumeUp() {

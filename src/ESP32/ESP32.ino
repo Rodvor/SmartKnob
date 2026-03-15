@@ -3,431 +3,377 @@
 #include <SimpleFOC.h>
 #include <math.h>
 
-// Get menu config and add extra config here.
 #include "menu_config.h"
-
-// Get ESP32 pin config
 #include "pin_config.h"
 
+#define CST816S_ADDR        0x15
+#define CST816S_FINGER_REG  0x02
+#define CST816S_X_HIGH_REG  0x03  // bits [3:0] = X high
+#define CST816S_X_LOW_REG   0x04
+#define CST816S_SWIPE_THRESHOLD 40  // pixels to count as a swipe
 
-// Encoder
 MagneticSensorI2C encoder = MagneticSensorI2C(AS5600_I2C);
-
-// Screen
 TFT_eSPI tft = TFT_eSPI();
+BLDCMotor motor = BLDCMotor(7);
+BLDCDriver3PWM driver = BLDCDriver3PWM(IN1, IN2, IN3, EN);
 
-// SimpleFOC
-BLDCMotor motor = BLDCMotor(7);   // set correct pole pairs
-BLDCDriver3PWM driver = BLDCDriver3PWM(
-  IN1,  // IN1
-  IN2,  // IN2
-  IN3,  // IN3
-  EN   // EN
-);
+bool last_button_state = HIGH;
 
-// Button state
-bool last_state = HIGH;
+const int cx = 120;
+const int cy = 120;
+const int radius = 120;
+const int lineLength = 7;
 
-// For drawing indents
-const int cx = 120;        // center x
-const int cy = 120;        // center y
-const int radius = 120;    // distance from center
-const int lineLength = 7;  // length of each line
-
-// Variable setup for encoder and motor
-float currentPos = 0;   // Current encoder position
-float max_torque = 0.3; // Define some torque values, changed later...
+float currentPos = 0;
+float max_torque = 0.3;
 float torque_build_up = 0.8;
 int current_choice = 0;
 
-// Variable setup for screen
-bool display_status = true; // On/off
+bool display_status = true;
 bool take_input = false;
-int last_activity = 0;
+unsigned long last_activity = 0;
 int current_ui_id = -1;
 int new_ui_id = VOLUME_ID;
-int n_lines = 40;
-int discord_choice = 0; // Normal 0, mute 1, deafen 2.
-const int CHOICES[] = {VOLUME_ID, BRIGHT_ID, MEDIA_ID, DISCORD_ID}; // Menu choices listed in order from top -> clockwise
+int n_lines = VOLUME_NOTCHES;
+int discord_choice = 0;
+
+// Menus cycled by swipe — no MENU_ID
+const int CHOICES[] = {VOLUME_ID, BRIGHT_ID, MEDIA_ID, DISCORD_ID};
+const int N_CHOICES = 4;
+int current_menu_index = 0; // index into CHOICES[]
+
+// Touch state
+unsigned long last_touch_time = 0;
+const unsigned long TOUCH_DEBOUNCE_MS = 300;
+bool touch_active = false;
+int touch_start_x = -1;
+
+// Read a register from CST816S
+uint8_t readTouchReg(uint8_t reg) {
+  Wire.beginTransmission(CST816S_ADDR);
+  Wire.write(reg);
+  Wire.endTransmission(false);
+  Wire.requestFrom(CST816S_ADDR, (uint8_t)1);
+  if (Wire.available()) return Wire.read();
+  return 0;
+}
+
+// Read finger count
+uint8_t readTouchFingers() {
+  return readTouchReg(CST816S_FINGER_REG);
+}
+
+// Read X coordinate (10-bit)
+int readTouchX() {
+  uint8_t hi = readTouchReg(CST816S_X_HIGH_REG) & 0x0F;
+  uint8_t lo = readTouchReg(CST816S_X_LOW_REG);
+  return (hi << 8) | lo;
+}
 
 void setup() {
-
   Serial.begin(115200);
   Serial2.begin(57600, SERIAL_8N1, RXD2, TXD2);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);  // use internal pull-up
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-  // Setup encoder
+  // Encoder I2C
   Wire.begin(ENCODER_SDA, ENCODER_SCL);
   encoder.init();
-  
-  // Setup motor driver
-  driver.voltage_power_supply = 12.0;  // motor supply
-  driver.init();
 
-  // Link driver and sensor
+  // Touch I2C
+  pinMode(TP_RST, OUTPUT);
+  digitalWrite(TP_RST, LOW);
+  delay(10);
+  digitalWrite(TP_RST, HIGH);
+  delay(50);
+  pinMode(TP_INT, INPUT);
+  Wire1.begin(TP_SDA, TP_SCL);
+
+  driver.voltage_power_supply = 12.0;
+  driver.init();
   motor.linkDriver(&driver);
   motor.linkSensor(&encoder);
-
-  // Torque control 
   motor.controller = MotionControlType::torque;
   motor.torque_controller = TorqueControlType::voltage;
-  //motor.sensor_direction = Direction::CCW;
-
   motor.voltage_limit = 3.0;
   motor.init();
   motor.initFOC();
 
-  // Display blacklight pins
-  pinMode(BLK_PIN, OUTPUT);  // BLK-pin
+  pinMode(BLK_PIN, OUTPUT);
   digitalWrite(BLK_PIN, HIGH);
 
-  // Setup screen
   tft.init();
-  tft.fillScreen(TFT_BLACK); // Black
-  tft.setTextDatum(MC_DATUM); // Text alignment
-  tft.setFreeFont(&FreeSansBold18pt7b); // Set font
-  tft.setTextColor(TFT_WHITE); // Font to white
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(&FreeSansBold18pt7b);
+  tft.setTextColor(TFT_WHITE);
 
+  Serial.println("Scanning Wire...");
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("Found: 0x");
+      Serial.println(addr, HEX);
+    }
+  }
+  Serial.println("Done.");
+  }
+
+// Perform the tap action for the current menu
+void doTapAction() {
+  if (current_ui_id == VOLUME_ID) {
+    sendCmd("<play-pause>");
+  } else if (current_ui_id == MEDIA_ID) {
+    sendCmd("<play-pause>");
+  } else if (current_ui_id == DISCORD_ID) {
+    sendCmd("<mute>");
+  }
+  // BRIGHT_ID: do nothing
+}
+
+// Cycle menus left or right
+void swipeToMenu(int direction) { // +1 = right, -1 = left
+  current_menu_index = (current_menu_index + direction + N_CHOICES) % N_CHOICES;
+  new_ui_id = CHOICES[current_menu_index];
+  last_activity = millis();
+}
+
+void handleTouch() {
+  unsigned long now = millis();
+  uint8_t fingers = readTouchFingers();
+
+  if (fingers >= 1) {
+    int x = readTouchX();
+
+    if (!touch_active) {
+      // Finger just went down
+      touch_active = true;
+      touch_start_x = x;
+    }
+    // Finger still down — update last seen X (held in touch_start_x only at start)
+  } else {
+    if (touch_active) {
+      // Finger just lifted — evaluate gesture
+      touch_active = false;
+
+      if (now - last_touch_time < TOUCH_DEBOUNCE_MS) return;
+      last_touch_time = now;
+
+      // Read current X one more time for end position
+      // (fingers==0 so we use the last known start; instead track end_x)
+      // Since we can't read X on release, we check swipe by tracking in the
+      // active branch below — see note. For now use start_x saved approach:
+      // This is handled by tracking end_x separately (see touch_end_x below).
+    }
+  }
+}
+
+// Revised approach — track start and end X properly
+int touch_end_x = -1;
+
+void handleTouchRevised() {
+  unsigned long now = millis();
+  uint8_t fingers = readTouchFingers();
+
+  if (fingers >= 1) {
+    int x = readTouchX();
+    if (!touch_active) {
+      touch_active = true;
+      touch_start_x = x;
+    }
+    touch_end_x = x; // continuously update end position
+  } else {
+    if (touch_active) {
+      touch_active = false;
+
+      if (now - last_touch_time < TOUCH_DEBOUNCE_MS) return;
+      last_touch_time = now;
+
+      if (!display_status) {
+        setDisplay(true);
+        last_activity = now;
+        return;
+      }
+
+      int dx = touch_end_x - touch_start_x;
+
+      if (dx > CST816S_SWIPE_THRESHOLD) {
+        // Swiped right
+        swipeToMenu(+1);
+      } else if (dx < -CST816S_SWIPE_THRESHOLD) {
+        // Swiped left
+        swipeToMenu(-1);
+      } else {
+        // Tap
+        doTapAction();
+        last_activity = now;
+      }
+    }
+  }
 }
 
 void loop() {
-
-  // Mandatory for FOC
   motor.loopFOC();
 
+  // Physical button — now does tap action directly
   bool button_state = digitalRead(BUTTON_PIN);
-
-  if (button_state != last_state) {
-
-    if ( button_state == LOW ) {
-      // Button has been pressed
+  if (button_state != last_button_state) {
+    if (button_state == LOW) {
       if (display_status) {
-        // Do action if display is on
-        buttonPressed();
+        doTapAction();
+        last_activity = millis();
       } else {
-        // Only wake display if display is of
         setDisplay(true);
         last_activity = millis();
       }
     }
-
-    last_state = button_state;
+    last_button_state = button_state;
   }
 
-  // If new ui has been selected (button press/idle) -> redraw
+  // Touch
+  handleTouchRevised();
+
   if (new_ui_id != current_ui_id) {
     drawUI(new_ui_id);
     take_input = false;
   }
 
-  // Read encoder
   float pos = encoder.getAngle();
-
-  // Choice
   int choice = calc_choice(pos);
 
-  // Calculate torque
   if (take_input) {
-    // Check if menu has been initialized and ready for input
     float torque = calc_torque(pos);
     motor.move(torque);
-
   } else {
-    // Move motor to menu default position
     float target_angle = 0;
-
-    // Unless discord has is selected -> move to prev. choice
     if (current_ui_id == DISCORD_ID) {
-      target_angle = discord_choice * 2*PI/3;
+      target_angle = discord_choice * 2 * PI / 3;
     }
-
-    // Apply torque
-    float torque = torque_to_angle(pos, target_angle); 
+    float torque = torque_to_angle(pos, target_angle);
     motor.move(torque);
-
-    // If we have reached close enough -> menu initialized
-    if ( abs(((target_angle - PI/2) - pos)) < 0.05 ) {
+    if (abs(((target_angle - PI / 2) - pos)) < 0.05) {
       take_input = true;
       current_choice = choice;
     }
-
   }
 
-
-
-
-  // Logic
   if (pos != currentPos) {
-    // Dial has moved
-
-    // Move ball indicator
     drawBall(currentPos, TFT_BLACK);
     drawBall(pos, TFT_WHITE);
 
-    // Get the current choice
     int new_choice = calc_choice(pos);
 
     if (new_choice != current_choice && take_input) {
-      // Current choice is different and we actually want input
-
       if (pos > currentPos) {
-        // Increase
-        if ( current_ui_id == VOLUME_ID ) {
-          sendCmd("<volume-up>");
-        } else if ( current_ui_id == MEDIA_ID ) {
-          sendCmd("<skip>");
-        } else if ( current_ui_id == BRIGHT_ID ) {
-          sendCmd("<bright-up>");
-        } 
+        if (current_ui_id == VOLUME_ID)      sendCmd("<volume-up>");
+        else if (current_ui_id == MEDIA_ID)  sendCmd("<skip>");
+        else if (current_ui_id == BRIGHT_ID) sendCmd("<bright-up>");
       } else {
-        // Decrease
-        if ( current_ui_id == VOLUME_ID ) {
-          sendCmd("<volume-down>");
-        } else if ( current_ui_id == MEDIA_ID ) {
-          sendCmd("<previous>");
-        } else if ( current_ui_id == BRIGHT_ID ) {
-          sendCmd("<bright-down>");
-        } 
+        if (current_ui_id == VOLUME_ID)      sendCmd("<volume-down>");
+        else if (current_ui_id == MEDIA_ID)  sendCmd("<previous>");
+        else if (current_ui_id == BRIGHT_ID) sendCmd("<bright-down>");
       }
 
-      if ( current_ui_id == DISCORD_ID) {
-
+      if (current_ui_id == DISCORD_ID) {
         if (new_choice == 0) {
-          // To top -> unmute by toggling mute
           sendCmd("<mute>");
         } else if ((new_choice == 1) && (current_choice == 0)) {
-          // To mute from unmute -> mute
           sendCmd("<mute>");
         } else if ((new_choice == 2) && (current_choice == 0)) {
-          // To deafen from unmute -> mute and deafen
           sendCmd("<mute-and-deafen>");
         } else {
-          // Moved from mute -> deafen or deafen -> mute.
           sendCmd("<deafen>");
         }
-
         discord_choice = new_choice;
-
       }
 
-      if ( !display_status ) {
-        setDisplay(true);
-      }
-
+      if (!display_status) setDisplay(true);
       last_activity = millis();
       current_choice = new_choice;
-
     }
 
     currentPos = pos;
-
   }
 
-  if ( display_status && millis() - last_activity > IDLE_TIMEOUT * 60000) {
-    new_ui_id = 0;
+  if (display_status && millis() - last_activity > IDLE_TIMEOUT * 60000) {
     setDisplay(false);
   }
 
-  delay(1); 
+  delay(1);
 }
 
-
-
-
-
-
-
-
-
-
+// --- UI ---
 
 void drawUI(int id) {
-
-  // Reset
   tft.fillScreen(TFT_BLACK);
   current_ui_id = id;
 
-  // id 0 = Volume adjustment
   if (id == VOLUME_ID) {
-
-    // Volume
-    tft.setCursor(60, 130);
-    tft.println("Volume");
-
-    max_torque = VOLUME_TORQUE;
-    torque_build_up = VOLUME_BUILDUP;
-    n_lines = VOLUME_NOTCHES;
-
-    // Draw dial
-    drawClockLines();
-    return;
-
+    tft.setCursor(60, 130); tft.println("Volume");
+    max_torque = VOLUME_TORQUE; torque_build_up = VOLUME_BUILDUP; n_lines = VOLUME_NOTCHES;
+    drawClockLines(); return;
   }
-
-  if (id == MENU_ID) {
-
-    // Menu
-    tft.setCursor(70, 130);
-    tft.println("Menu");
-
-    max_torque = MENU_TORQUE;
-    torque_build_up = MENU_BUILDUP;
-    n_lines = MENU_NOTCHES;
-
-    // Draw dial
-    drawClockLines();
-    return;
-
-  }
-
-  // Media skip and shii
   if (id == MEDIA_ID) {
-
-
-    tft.setCursor(65, 130);
-    tft.println("Media");
-
-    max_torque = MEDIA_TORQUE;
-    torque_build_up = MEDIA_BUILDUP;
-    n_lines = MEDIA_NOTCHES;
-
-    // Draw dial
-    drawClockLines();
-    return;
-
+    tft.setCursor(65, 130); tft.println("Media");
+    max_torque = MEDIA_TORQUE; torque_build_up = MEDIA_BUILDUP; n_lines = MEDIA_NOTCHES;
+    drawClockLines(); return;
   }
-
   if (id == DISCORD_ID) {
-
-    // Discord
-
-    tft.setCursor(60, 130);
-    tft.println("Discord");
-
-    max_torque = DISCORD_TORQUE;
-    torque_build_up = DISCORD_BUILDUP;
-    n_lines = DISCORD_NOTCHES;
-
-    // Draw dial
-    drawClockLines();
-    return;
-
+    tft.setCursor(60, 130); tft.println("Discord");
+    max_torque = DISCORD_TORQUE; torque_build_up = DISCORD_BUILDUP; n_lines = DISCORD_NOTCHES;
+    drawClockLines(); return;
   }
-
   if (id == BRIGHT_ID) {
-
-
-    tft.setCursor(28, 130);
-    tft.println("Brightness");
-
-    max_torque = 0.4;
-    torque_build_up = 0.4;
-    n_lines = 20;
-
-    // Draw dial
-    drawClockLines();
-    return;
-
+    tft.setCursor(28, 130); tft.println("Brightness");
+    max_torque = BRIGHT_TORQUE; torque_build_up = BRIGHT_BUILDUP; n_lines = BRIGHT_NOTCHES;
+    drawClockLines(); return;
   }
-
-
-
 }
 
-
-
-
 void drawClockLines() {
-
   for (int i = 0; i < n_lines; i++) {
-
     float angle = i * (2.0 * PI / n_lines) - PI / 2;
-
     int x0 = round(cx + radius * cos(angle));
     int y0 = round(cy + radius * sin(angle));
     int x1 = round(cx + (radius - lineLength) * cos(angle));
     int y1 = round(cy + (radius - lineLength) * sin(angle));
-
     tft.drawLine(x0, y0, x1, y1, 0x9492);
   }
 }
 
-
-
-
-
-
-
 float calc_torque(float pos) {
-
   const float amplitude = torque_build_up * max_torque;
-  const float inside_tan = 0.5 * n_lines * (pos + PI/2);
-
+  const float inside_tan = 0.5 * n_lines * (pos + PI / 2);
   float torque = amplitude * tan(inside_tan);
-
   if (torque > max_torque) return max_torque;
   if (torque < -max_torque) return -max_torque;
-
   return torque;
 }
 
 float torque_to_angle(float pos, float angle) {
-
-  // Calculate torque to move to set angle. f(x) = a * x ^ (1/3)
   const float a = 0.5;
-  const float x = (pos + PI/2 - angle);
-
-  float torque = a * cbrt(x);
-
-  return torque;
+  const float x = (pos + PI / 2 - angle);
+  return a * cbrt(x);
 }
 
 int calc_choice(float pos) {
-  // Normalize angle to 0..2*PI
-  float angle = pos + PI/2;
-  while (angle < 0) angle += 2*PI;
-  while (angle >= 2*PI) angle -= 2*PI;
-
-  // Map to 0..n_lines-1
-  int choice = ((int)round(angle / (2.0 * PI) * n_lines)) % n_lines;
-  return choice;
+  float angle = pos + PI / 2;
+  while (angle < 0) angle += 2 * PI;
+  while (angle >= 2 * PI) angle -= 2 * PI;
+  return ((int)round(angle / (2.0 * PI) * n_lines)) % n_lines;
 }
 
 void drawBall(float pos, uint16_t color) {
-
   int r_ball = radius - 18;
   int ball_size = 5;
-
   int x = round(cx + r_ball * cos(pos));
   int y = round(cy + r_ball * sin(pos));
-
   tft.fillCircle(x, y, ball_size, color);
 }
 
-void buttonPressed() {
-
-  if ( current_ui_id != MENU_ID ) {
-    new_ui_id = MENU_ID;
-    return;
-  }
-
-  new_ui_id = CHOICES[current_choice];
-
-}
-
-
 void setDisplay(bool onoff) {
-
   display_status = onoff;
-
-  if ( onoff) {
-    digitalWrite(BLK_PIN, HIGH);
-    return;
-  }
-
-  digitalWrite(BLK_PIN, LOW);
+  digitalWrite(BLK_PIN, onoff ? HIGH : LOW);
 }
-
 
 void sendCmd(const char* cmd) {
   Serial2.println(cmd);
