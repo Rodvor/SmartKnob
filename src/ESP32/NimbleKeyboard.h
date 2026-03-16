@@ -146,11 +146,27 @@ public:
   }
 
   void volumeUp() {
+    if (!connected) return;
+    uint8_t report[8] = {MOD_LEFT_SHIFT | MOD_LEFT_ALT, 0, 0, 0, 0, 0, 0, 0};
+    input->setValue(report, sizeof(report));
+    input->notify();
+    delay(5);
     sendConsumer(KEY_MEDIA_VOLUME_UP);
+    memset(report, 0, sizeof(report));
+    input->setValue(report, sizeof(report));
+    input->notify();
   }
 
   void volumeDown() {
+    if (!connected) return;
+    uint8_t report[8] = {MOD_LEFT_SHIFT | MOD_LEFT_ALT, 0, 0, 0, 0, 0, 0, 0};
+    input->setValue(report, sizeof(report));
+    input->notify();
+    delay(5);
     sendConsumer(KEY_MEDIA_VOLUME_DOWN);
+    memset(report, 0, sizeof(report));
+    input->setValue(report, sizeof(report));
+    input->notify();
   }
 
   void playPause() {
