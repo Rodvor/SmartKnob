@@ -1,10 +1,6 @@
 #ifndef PIN_CONFIG_H
 #define PIN_CONFIG_H
 
-// Leonardo connection pins
-#define RXD2 14
-#define TXD2 13
-
 // SimpleFOC ports
 #define EN 25
 #define IN1 26
