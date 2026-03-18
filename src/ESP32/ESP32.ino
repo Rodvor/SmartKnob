@@ -49,6 +49,9 @@ bool touch_active = false;
 int touch_start_x = -1;
 int touch_end_x = -1;
 
+float sleep_pos = 0;
+#define WAKE_ROTATION_THRESHOLD (PI / 60.0)
+
 TaskHandle_t focTask;
 
 void focLoop(void* param) {
@@ -197,6 +200,12 @@ void loop() {
   }
 
   if (pos != currentPos) {
+
+    if (!display_status && fabs(pos - sleep_pos) > WAKE_ROTATION_THRESHOLD) {
+      setDisplay(true);
+      last_activity = millis();
+    }
+
     drawBall(currentPos, TFT_BLACK);
     drawBall(pos, TFT_WHITE);
 
@@ -292,5 +301,6 @@ void drawBall(float pos, uint16_t color) {
 
 void setDisplay(bool onoff) {
   display_status = onoff;
+  if (!onoff) sleep_pos = encoder.getAngle();
   digitalWrite(BLK_PIN, onoff ? HIGH : LOW);
 }
