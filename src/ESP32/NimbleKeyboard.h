@@ -79,6 +79,9 @@ public:
   void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
     connected = true;
     Serial.println("BLE connected");
+    // Request tight interval (7.5–15ms), no slave latency,
+    // 2s supervision timeout. Prevents host from dropping idle connection.
+    s->updateConnParams(info.getConnHandle(), 6, 12, 0, 200);
   }
 
   void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
@@ -125,7 +128,7 @@ public:
     uint8_t report[8] = {modifiers, 0, key1, key2, 0, 0, 0, 0};
     input->setValue(report, sizeof(report));
     input->notify();
-    delay(5);
+    vTaskDelay(pdMS_TO_TICKS(10));
     // Release
     memset(report, 0, sizeof(report));
     input->setValue(report, sizeof(report));
@@ -138,7 +141,7 @@ public:
     uint8_t report[2] = {(uint8_t)(key & 0xFF), (uint8_t)(key >> 8)};
     consumer->setValue(report, sizeof(report));
     consumer->notify();
-    delay(5);
+    vTaskDelay(pdMS_TO_TICKS(10));
     // Release
     uint8_t release[2] = {0, 0};
     consumer->setValue(release, sizeof(release));

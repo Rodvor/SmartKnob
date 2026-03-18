@@ -247,7 +247,15 @@ void loop() {
     setDisplay(false);
   }
 
-  delay(1);
+  static unsigned long last_keepalive = 0;
+  if (millis() - last_keepalive > 2000 && bleKeyboard.isConnected()) {
+      // Send a zero keyboard report to keep the supervision timer alive
+      uint8_t empty[8] = {0};
+      bleKeyboard.input->setValue(empty, sizeof(empty));
+      bleKeyboard.input->notify();
+      last_keepalive = millis();
+  }
+  vTaskDelay(1); // yield instead of blocking delay
 }
 
 // --- UI ---
