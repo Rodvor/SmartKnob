@@ -81,7 +81,7 @@ public:
     Serial.println("BLE connected");
     // Request tight interval (7.5–15ms), no slave latency,
     // 2s supervision timeout. Prevents host from dropping idle connection.
-    s->updateConnParams(info.getConnHandle(), 6, 12, 0, 200);
+    s->updateConnParams(info.getConnHandle(), 6, 12, 10, 200);
   }
 
   void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
