@@ -113,17 +113,15 @@ void setup() {
 
   tft.init();
   tft.fillScreen(TFT_BLACK);
+  tft.setFreeFont(&FreeSans12pt7b);
   tft.setTextDatum(MC_DATUM);
-  tft.setFreeFont(&FreeSansBold18pt7b);
-  tft.setTextColor(TFT_WHITE);
+  tft.setTextColor(0xad75);
 
   bleKeyboard.begin("Haptic Knob");
 
   tft.fillScreen(TFT_BLACK);
-  tft.setCursor(30, 110);
-  tft.println("Waiting");
-  tft.setCursor(40, 145);
-  tft.println("for BLE...");
+  tft.drawBitmap(ICON_X, ICON_Y, icon_bluetooth, ICON_W, ICON_H, TFT_WHITE);
+  tft.drawString("Connecting...", 122, 180);
 
   while (!bleKeyboard.isConnected()) {
     delay(500);
