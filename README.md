@@ -28,3 +28,8 @@ Volume and media are controlled using dedicated buttons e.g. KEY_MEDIA_VOLUME_UP
 - Alt + F13 -> Deafen
 - Shift + Alt + F13 -> Disconnect
 
+
+
+
+
+Images are from google and no rights have been requested. Personal use only.

@@ -1,3 +1,5 @@
+// Note: Colors for fonts using RGB565
+
 #include <TFT_eSPI.h>
 #include <Wire.h>
 #include <SimpleFOC.h>
@@ -6,6 +8,7 @@
 
 #include "menu_config.h"
 #include "pin_config.h"
+#include "icons.h"
 
 #define CST816S_ADDR        0x15
 #define CST816S_FINGER_REG  0x02
@@ -252,13 +255,30 @@ void loop() {
 
 // --- UI ---
 
+void drawMenuIcon(int id) {
+  const uint8_t* bmp = nullptr;
+  switch (id) {
+    case VOLUME_ID:  bmp = icon_volume;     break;
+    case MEDIA_ID:   bmp = icon_media;      break;
+    case DISCORD_ID: bmp = icon_discord;    break;
+    case BRIGHT_ID:  bmp = icon_brightness; break;
+  }
+  if (bmp) {
+    tft.drawBitmap(ICON_X, ICON_Y, bmp, ICON_W, ICON_H, TFT_WHITE);
+  }
+}
+
 void drawUI(int id) {
   tft.fillScreen(TFT_BLACK);
   current_ui_id = id;
-  if      (id == VOLUME_ID)  { tft.setCursor(60, 130); tft.println("Volume");     max_torque = VOLUME_TORQUE;  torque_build_up = VOLUME_BUILDUP;  n_lines = VOLUME_NOTCHES; }
-  else if (id == MEDIA_ID)   { tft.setCursor(65, 130); tft.println("Media");      max_torque = MEDIA_TORQUE;   torque_build_up = MEDIA_BUILDUP;   n_lines = MEDIA_NOTCHES; }
-  else if (id == DISCORD_ID) { tft.setCursor(60, 130); tft.println("Discord");    max_torque = DISCORD_TORQUE; torque_build_up = DISCORD_BUILDUP; n_lines = DISCORD_NOTCHES; }
-  else if (id == BRIGHT_ID)  { tft.setCursor(28, 130); tft.println("Brightness"); max_torque = BRIGHT_TORQUE;  torque_build_up = BRIGHT_BUILDUP;  n_lines = BRIGHT_NOTCHES; }
+  drawMenuIcon(id);
+  tft.setFreeFont(&FreeSans12pt7b);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(0xad75);
+  if      (id == VOLUME_ID)  { tft.drawString("Volume",     120, 180); max_torque = VOLUME_TORQUE;  torque_build_up = VOLUME_BUILDUP;  n_lines = VOLUME_NOTCHES; }
+  else if (id == MEDIA_ID)   { tft.drawString("Media",      120, 180); max_torque = MEDIA_TORQUE;   torque_build_up = MEDIA_BUILDUP;   n_lines = MEDIA_NOTCHES; }
+  else if (id == DISCORD_ID) { tft.drawString("Discord",    120, 180); max_torque = DISCORD_TORQUE; torque_build_up = DISCORD_BUILDUP; n_lines = DISCORD_NOTCHES; }
+  else if (id == BRIGHT_ID)  { tft.drawString("Brightness", 120, 180); max_torque = BRIGHT_TORQUE;  torque_build_up = BRIGHT_BUILDUP;  n_lines = BRIGHT_NOTCHES; }
   drawClockLines();
 }
 
