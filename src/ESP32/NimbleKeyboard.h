@@ -97,7 +97,6 @@ public:
 
     pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(this);
-    pServer->setServiceChangedInd(false);
 
     hid = new NimBLEHIDDevice(pServer);
     hid->setManufacturer("DIY");
