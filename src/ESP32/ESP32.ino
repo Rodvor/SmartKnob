@@ -39,7 +39,7 @@ int new_ui_id = VOLUME_ID;
 int n_lines = VOLUME_NOTCHES;
 int discord_choice = 0;
 
-const int CHOICES[] = {VOLUME_ID, BRIGHT_ID, MEDIA_ID, DISCORD_ID};
+const int CHOICES[] = {VOLUME_ID, MEDIA_ID, BRIGHT_ID, DISCORD_ID};
 const int N_CHOICES = 4;
 int current_menu_index = 0;
 
