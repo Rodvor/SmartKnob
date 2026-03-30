@@ -120,7 +120,7 @@ void setup() {
   bleKeyboard.begin("Haptic Knob");
 
   tft.fillScreen(TFT_BLACK);
-  tft.drawBitmap(ICON_X, ICON_Y, icon_bluetooth, ICON_W, ICON_H, TFT_WHITE);
+  tft.drawBitmap(ICON_X, ICON_Y, icon_bluetooth, ICON_W, ICON_H, BLUETOOTH_COLOR);
   tft.drawString("Connecting...", 122, 180);
 
   while (!bleKeyboard.isConnected()) {
@@ -255,14 +255,15 @@ void loop() {
 
 void drawMenuIcon(int id) {
   const uint8_t* bmp = nullptr;
+  unsigned int color = TFT_WHITE;
   switch (id) {
-    case VOLUME_ID:  bmp = icon_volume;     break;
-    case MEDIA_ID:   bmp = icon_media;      break;
-    case DISCORD_ID: bmp = icon_discord;    break;
-    case BRIGHT_ID:  bmp = icon_brightness; break;
+    case VOLUME_ID:  bmp = icon_volume;     color = VOLUME_COLOR;  break;
+    case MEDIA_ID:   bmp = icon_media;      color = MEDIA_COLOR;   break;
+    case DISCORD_ID: bmp = icon_discord;    color = DISCORD_COLOR; break;
+    case BRIGHT_ID:  bmp = icon_brightness; color = BRIGHT_COLOR;  break;
   }
   if (bmp) {
-    tft.drawBitmap(ICON_X, ICON_Y, bmp, ICON_W, ICON_H, TFT_WHITE);
+    tft.drawBitmap(ICON_X, ICON_Y, bmp, ICON_W, ICON_H, color);
   }
 }
 
