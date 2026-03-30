@@ -267,6 +267,19 @@ void drawMenuIcon(int id) {
   }
 }
 
+void drawSmallIcon(int id, int x, int y) {
+  const uint8_t* bmp = nullptr;
+  unsigned int color = TFT_WHITE;
+  switch (id) {
+    case UNMUTE_ID:  bmp = icon_unmute;   color = UNMUTE_COLOR;  break;
+    case MUTE_ID:   bmp = icon_mute;      color = MUTE_COLOR;   break;
+    case DEAFEN_ID: bmp = icon_deafen;    color = DEAFEN_COLOR; break;
+  }
+  if (bmp) {
+    tft.drawBitmap(x, y, bmp, SMALL_ICON_W, SMALL_ICON_H, color);
+  }
+}
+
 void drawUI(int id) {
   tft.fillScreen(TFT_BLACK);
   current_ui_id = id;
@@ -276,7 +289,15 @@ void drawUI(int id) {
   tft.setTextColor(0xad75);
   if      (id == VOLUME_ID)  { tft.drawString("Volume",     120, 180); max_torque = VOLUME_TORQUE;  torque_build_up = VOLUME_BUILDUP;  n_lines = VOLUME_NOTCHES; }
   else if (id == MEDIA_ID)   { tft.drawString("Media",      120, 180); max_torque = MEDIA_TORQUE;   torque_build_up = MEDIA_BUILDUP;   n_lines = MEDIA_NOTCHES; }
-  else if (id == DISCORD_ID) { tft.drawString("Discord",    120, 180); max_torque = DISCORD_TORQUE; torque_build_up = DISCORD_BUILDUP; n_lines = DISCORD_NOTCHES; }
+  else if (id == DISCORD_ID) { 
+    tft.drawString("Discord", 120, 180);
+    drawSmallIcon(UNMUTE_ID, 108, 30);
+    drawSmallIcon(MUTE_ID, 178, 155);
+    drawSmallIcon(DEAFEN_ID, 44, 155);
+    max_torque = DISCORD_TORQUE; 
+    torque_build_up = DISCORD_BUILDUP; 
+    n_lines = DISCORD_NOTCHES; 
+    }
   else if (id == BRIGHT_ID)  { tft.drawString("Brightness", 120, 180); max_torque = BRIGHT_TORQUE;  torque_build_up = BRIGHT_BUILDUP;  n_lines = BRIGHT_NOTCHES; }
   drawClockLines();
 }
