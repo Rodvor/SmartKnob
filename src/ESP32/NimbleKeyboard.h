@@ -148,29 +148,8 @@ public:
     consumer->notify();
   }
 
-  void volumeUp() {
-    if (!connected) return;
-    uint8_t report[8] = {MOD_LEFT_SHIFT | MOD_LEFT_ALT, 0, 0, 0, 0, 0, 0, 0};
-    input->setValue(report, sizeof(report));
-    input->notify();
-    delay(5);
-    sendConsumer(KEY_MEDIA_VOLUME_UP);
-    memset(report, 0, sizeof(report));
-    input->setValue(report, sizeof(report));
-    input->notify();
-  }
-
-  void volumeDown() {
-    if (!connected) return;
-    uint8_t report[8] = {MOD_LEFT_SHIFT | MOD_LEFT_ALT, 0, 0, 0, 0, 0, 0, 0};
-    input->setValue(report, sizeof(report));
-    input->notify();
-    delay(5);
-    sendConsumer(KEY_MEDIA_VOLUME_DOWN);
-    memset(report, 0, sizeof(report));
-    input->setValue(report, sizeof(report));
-    input->notify();
-  }
+  void volumeUp()   { sendVolumeKey(KEY_MEDIA_VOLUME_UP); }
+  void volumeDown() { sendVolumeKey(KEY_MEDIA_VOLUME_DOWN); }
 
   void playPause() {
     sendConsumer(KEY_MEDIA_PLAY_PAUSE);
@@ -207,5 +186,18 @@ public:
   // F15 = brightness up
   void pressF15() {
     sendKeyReport(0x00, HID_KEY_F15);
+  }
+
+private:
+  void sendVolumeKey(uint16_t key) {
+    if (!connected) return;
+    uint8_t report[8] = {MOD_LEFT_SHIFT | MOD_LEFT_ALT, 0, 0, 0, 0, 0, 0, 0};
+    input->setValue(report, sizeof(report));
+    input->notify();
+    delay(5);
+    sendConsumer(key);
+    memset(report, 0, sizeof(report));
+    input->setValue(report, sizeof(report));
+    input->notify();
   }
 };

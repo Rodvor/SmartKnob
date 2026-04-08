@@ -20,9 +20,4 @@
 // Most screen configs in /Arduino/libraries/TFT_eSPI/User_Setup.h
 #define BLK_PIN 2 // Screen on/off stuff
 
-
-// Buttons ()
-#define BUTTON_PIN 27
-
-
 #endif

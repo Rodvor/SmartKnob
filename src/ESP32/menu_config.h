@@ -17,12 +17,6 @@
 #define VOLUME_BUILDUP 0.6
 #define VOLUME_ID 0
 
-// Main menu
-#define MENU_NOTCHES 4
-#define MENU_TORQUE 1.0
-#define MENU_BUILDUP 0.8
-#define MENU_ID 1
-
 // Media controls
 #define MEDIA_NOTCHES 20
 #define MEDIA_TORQUE 0.4

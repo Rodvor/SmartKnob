@@ -22,8 +22,6 @@ BLDCMotor motor = BLDCMotor(7);
 BLDCDriver3PWM driver = BLDCDriver3PWM(IN1, IN2, IN3, EN);
 NimBLEKeyboard bleKeyboard;
 
-bool last_button_state = HIGH;
-
 const int cx = 120;
 const int cy = 120;
 const int radius = 120;
@@ -83,7 +81,6 @@ int readTouchX() {
 
 void setup() {
   Serial.begin(115200);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   Wire.begin(ENCODER_SDA, ENCODER_SCL);
   encoder.init();
@@ -169,15 +166,6 @@ void handleTouchRevised() {
 }
 
 void loop() {
-  bool button_state = digitalRead(BUTTON_PIN);
-  if (button_state != last_button_state) {
-    if (button_state == LOW) {
-      if (display_status) { doTapAction(); last_activity = millis(); }
-      else                { setDisplay(true); last_activity = millis(); }
-    }
-    last_button_state = button_state;
-  }
-
   handleTouchRevised();
 
   if (new_ui_id != current_ui_id) {
@@ -186,7 +174,6 @@ void loop() {
   }
 
   float pos = encoder.getAngle();
-  int choice = calc_choice(pos);
 
   if (take_input) {
     motor.move(calc_torque(pos));
