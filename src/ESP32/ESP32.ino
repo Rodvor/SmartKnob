@@ -174,6 +174,7 @@ void loop() {
   }
 
   float pos = encoder.getAngle();
+  int choice = calc_choice(pos);
 
   if (take_input) {
     motor.move(calc_torque(pos));
