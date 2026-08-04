@@ -25,8 +25,8 @@
 
 // Discord voice chat controls
 #define DISCORD_NOTCHES 3
-#define DISCORD_TORQUE 0.5
-#define DISCORD_BUILDUP 1.0
+#define DISCORD_TORQUE 0.6
+#define DISCORD_BUILDUP 1.5
 #define DISCORD_ID 3
 
 // Brightness controls

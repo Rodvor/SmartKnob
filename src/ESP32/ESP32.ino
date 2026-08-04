@@ -1,11 +1,13 @@
 // Note: Colors for fonts using RGB565
 
+// Include libraries
 #include <TFT_eSPI.h>
 #include <Wire.h>
 #include <SimpleFOC.h>
 #include <math.h>
 #include "NimBLEKeyboard.h"
 
+// Include configurations and icons
 #include "menu_config.h"
 #include "pin_config.h"
 #include "icons.h"
@@ -16,22 +18,29 @@
 #define CST816S_X_LOW_REG   0x04
 #define CST816S_SWIPE_THRESHOLD 40
 
+// Minimum torque. No torque if below this number
+#define MINIMUM_TORQUE  0.1
+
+// Define objects
 MagneticSensorI2C encoder = MagneticSensorI2C(AS5600_I2C);
 TFT_eSPI tft = TFT_eSPI();
 BLDCMotor motor = BLDCMotor(7);
 BLDCDriver3PWM driver = BLDCDriver3PWM(IN1, IN2, IN3, EN);
 NimBLEKeyboard bleKeyboard;
 
+// For notches
 const int cx = 120;
 const int cy = 120;
 const int radius = 120;
 const int lineLength = 7;
 
+// For motor calculations
 float currentPos = 0;
 float max_torque = 0.3;
 float torque_build_up = 0.8;
 int current_choice = 0;
 
+// For UI logic
 bool display_status = true;
 bool take_input = false;
 unsigned long last_activity = 0;
@@ -330,6 +339,8 @@ float calc_torque(float pos) {
   const float amplitude = torque_build_up * max_torque;
   const float inside_tan = 0.5 * n_lines * (pos + PI / 2);
   float torque = amplitude * tan(inside_tan);
+
+  if (abs(torque) < MINIMUM_TORQUE) return 0.0;
   if (torque > max_torque) return max_torque;
   if (torque < -max_torque) return -max_torque;
   return torque;
