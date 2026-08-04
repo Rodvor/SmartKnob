@@ -79,8 +79,44 @@ int readTouchX() {
   return (hi << 8) | lo;
 }
 
+void dumpBleLog() {
+  if (!LittleFS.begin(false)) return;
+  fs::File f = LittleFS.open("/ble_log.txt", "r");
+  if (!f) {
+    Serial.println("No BLE log found.");
+    return;
+  }
+  Serial.println("=== BLE LOG ===");
+  while (f.available()) {
+    Serial.write(f.read());
+  }
+  Serial.println("=== END LOG ===");
+  f.close();
+}
+
 void setup() {
   Serial.begin(115200);
+  //delay(500); // give Serial monitor time to connect
+  //dumpBleLog();
+
+  bleKeyboard.begin("Haptic Knob");
+
+  // Set blacklight pins
+  pinMode(BLK_PIN, OUTPUT);
+  digitalWrite(BLK_PIN, HIGH);
+
+  // Init screen
+  tft.init();
+  tft.fillScreen(TFT_BLACK);
+  tft.setFreeFont(&FreeSans12pt7b);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(0xad75);
+
+  // Bluetooth connecting screen
+  tft.fillScreen(TFT_BLACK);
+  tft.drawBitmap(ICON_X, ICON_Y, icon_bluetooth, ICON_W, ICON_H, BLUETOOTH_COLOR);
+  tft.drawString("Connecting...", 122, 180);
+
 
   Wire.begin(ENCODER_SDA, ENCODER_SCL);
   encoder.init();
@@ -104,21 +140,6 @@ void setup() {
   motor.initFOC();
 
   xTaskCreatePinnedToCore(focLoop, "FOC", 4096, NULL, 1, &focTask, 1);
-
-  pinMode(BLK_PIN, OUTPUT);
-  digitalWrite(BLK_PIN, HIGH);
-
-  tft.init();
-  tft.fillScreen(TFT_BLACK);
-  tft.setFreeFont(&FreeSans12pt7b);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(0xad75);
-
-  bleKeyboard.begin("Haptic Knob");
-
-  tft.fillScreen(TFT_BLACK);
-  tft.drawBitmap(ICON_X, ICON_Y, icon_bluetooth, ICON_W, ICON_H, BLUETOOTH_COLOR);
-  tft.drawString("Connecting...", 122, 180);
 
   while (!bleKeyboard.isConnected()) {
     delay(500);
@@ -155,7 +176,11 @@ void handleTouchRevised() {
       if (now - last_touch_time < TOUCH_DEBOUNCE_MS) return;
       last_touch_time = now;
 
-      if (!display_status) { setDisplay(true); last_activity = now; return; }
+      if (!display_status) {
+        setDisplay(true);
+        last_activity = now;
+        return;
+      }
 
       int dx = touch_end_x - touch_start_x;
       if      (dx >  CST816S_SWIPE_THRESHOLD) swipeToMenu(+1);

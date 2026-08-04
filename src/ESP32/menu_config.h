@@ -35,7 +35,7 @@
 #define BRIGHT_BUILDUP 0.4
 #define BRIGHT_ID 4
 
-#define IDLE_TIMEOUT 10 // Minutes until idle
+#define IDLE_TIMEOUT 10 // Minutes until display sleep
 
 
 #endif

@@ -5,6 +5,7 @@
 #include <NimBLEUtils.h>
 #include <NimBLEHIDDevice.h>
 #include <HIDTypes.h>
+#include <LittleFS.h>
 
 // Consumer key codes
 #define KEY_MEDIA_VOLUME_UP      0xE9
@@ -75,22 +76,57 @@ public:
   NimBLECharacteristic* consumer = nullptr;
   bool connected = false;
 
-  // Newer NimBLE passes connInfo by reference, not just server pointer
+  uint16_t connHandle = 0;
+  uint32_t connectedSince = 0;
+  bool loggingReady = false;
+
+  static const size_t MAX_LOG_SIZE = 8192;
+
+  void logEvent(const char* msg) {
+    if (!loggingReady) return;
+    fs::File f = LittleFS.open("/ble_log.txt", "a");
+    if (!f) return;
+    // Check size and truncate if too large
+    if (f.size() > MAX_LOG_SIZE) {
+      f.close();
+      LittleFS.remove("/ble_log.txt");
+      f = LittleFS.open("/ble_log.txt", "a");
+      if (!f) return;
+      f.println("[log truncated]");
+    }
+    unsigned long s = millis() / 1000;
+    unsigned long m = s / 60;
+    unsigned long h = m / 60;
+    f.printf("[%02lu:%02lu:%02lu] %s\n", h % 100, m % 60, s % 60, msg);
+    f.close();
+  }
+
   void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
     connected = true;
+    connHandle = info.getConnHandle();
+    connectedSince = millis();
     Serial.println("BLE connected");
-    // Request tight interval (7.5–15ms), no slave latency,
-    // 2s supervision timeout. Prevents host from dropping idle connection.
-    s->updateConnParams(info.getConnHandle(), 6, 12, 10, 200);
+    logEvent("Connected");
+    // Let macOS choose its own connection parameters — requesting specific params
+    // causes renegotiation conflicts that produce 0x222 timeouts and temporary slowness.
   }
 
   void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
     connected = false;
-    Serial.println("BLE disconnected, restarting advertising");
+    uint32_t duration = (millis() - connectedSince) / 1000;
+    char buf[80];
+    snprintf(buf, sizeof(buf), "Disconnected reason=0x%02X, duration=%lus", reason, duration);
+    Serial.println(buf);
+    logEvent(buf);
     NimBLEDevice::startAdvertising();
   }
 
   void begin(const char* deviceName = "Haptic Knob") {
+    if (LittleFS.begin(true)) {
+      loggingReady = true;
+      logEvent("Device booted");
+    }
+
     NimBLEDevice::init(deviceName);
     NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_BOND);
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
@@ -100,14 +136,12 @@ public:
 
     hid = new NimBLEHIDDevice(pServer);
     hid->setManufacturer("DIY");
-    hid->setPnp(0x02, 0x045E, 0x07A5, 0x0111);
+    hid->setPnp(0x02, 0x303A, 0x0001, 0x0100);  // Espressif VID
     hid->setHidInfo(0x00, 0x01);
 
     hid->setReportMap((uint8_t*)hidReportDescriptor, sizeof(hidReportDescriptor));
 
-    // Keyboard input report (ID 1)
     input = hid->getInputReport(1);
-    // Consumer input report (ID 2)
     consumer = hid->getInputReport(2);
 
     hid->startServices();
@@ -118,6 +152,7 @@ public:
     adv->start();
 
     Serial.println("BLE HID advertising started");
+    logEvent("Advertising started");
   }
 
   bool isConnected() { return connected; }
