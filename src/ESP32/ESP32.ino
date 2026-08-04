@@ -21,12 +21,21 @@
 // Minimum torque. No torque if below this number
 #define MINIMUM_TORQUE  0.1
 
+// Moving ball sprite
+
+#define BALL_RADIUS       5
+#define BALL_SPRITE_SIZE  40   // 2*(BALL_RADIUS+margin) + headroom for movement per frame
+#define SCREEN_SIZE       240  // adjust if your panel isn't 240x240
+#define SPRITE_TRANSPARENT 0xF81F  // magenta marker, unused elsewhere in the UI
+
 // Define objects
 MagneticSensorI2C encoder = MagneticSensorI2C(AS5600_I2C);
 TFT_eSPI tft = TFT_eSPI();
 BLDCMotor motor = BLDCMotor(7);
 BLDCDriver3PWM driver = BLDCDriver3PWM(IN1, IN2, IN3, EN);
 NimBLEKeyboard bleKeyboard;
+
+TFT_eSprite ballSprite = TFT_eSprite(&tft);
 
 // For notches
 const int cx = 120;
@@ -120,6 +129,9 @@ void setup() {
   tft.setFreeFont(&FreeSans12pt7b);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(0xad75);
+  // Ball sprite
+  ballSprite.setColorDepth(16);
+  ballSprite.createSprite(BALL_SPRITE_SIZE, BALL_SPRITE_SIZE);
 
   // Bluetooth connecting screen
   tft.fillScreen(TFT_BLACK);
@@ -229,8 +241,7 @@ void loop() {
       last_activity = millis();
     }
 
-    drawBall(currentPos, TFT_BLACK);
-    drawBall(pos, TFT_WHITE);
+    drawBall(currentPos, pos);
 
     int new_choice = calc_choice(pos);
 
@@ -357,10 +368,32 @@ int calc_choice(float pos) {
   return ((int)round(angle / (2.0 * PI) * n_lines)) % n_lines;
 }
 
-void drawBall(float pos, uint16_t color) {
-  int x = round(cx + (radius - 18) * cos(pos));
-  int y = round(cy + (radius - 18) * sin(pos));
-  tft.fillCircle(x, y, 5, color);
+void drawBall(float posOld, float posNew) {
+  int xOld = round(cx + (radius - 18) * cos(posOld));
+  int yOld = round(cy + (radius - 18) * sin(posOld));
+  int xNew = round(cx + (radius - 18) * cos(posNew));
+  int yNew = round(cy + (radius - 18) * sin(posNew));
+
+  const int margin = 2;
+  int minX = min(xOld, xNew) - BALL_RADIUS - margin;
+  int minY = min(yOld, yNew) - BALL_RADIUS - margin;
+  int maxX = max(xOld, xNew) + BALL_RADIUS + margin;
+  int maxY = max(yOld, yNew) + BALL_RADIUS + margin;
+  int w = maxX - minX;
+  int h = maxY - minY;
+
+  if (w <= BALL_SPRITE_SIZE && h <= BALL_SPRITE_SIZE) {
+    minX = constrain(minX, 0, SCREEN_SIZE - BALL_SPRITE_SIZE);
+    minY = constrain(minY, 0, SCREEN_SIZE - BALL_SPRITE_SIZE);
+
+    ballSprite.fillSprite(SPRITE_TRANSPARENT);
+    ballSprite.fillCircle(xOld - minX, yOld - minY, BALL_RADIUS, TFT_BLACK);
+    ballSprite.fillCircle(xNew - minX, yNew - minY, BALL_RADIUS, TFT_WHITE);
+    ballSprite.pushSprite(minX, minY, SPRITE_TRANSPARENT);
+  } else {
+    tft.fillCircle(xOld, yOld, BALL_RADIUS, TFT_BLACK);
+    tft.fillCircle(xNew, yNew, BALL_RADIUS, TFT_WHITE);
+  }
 }
 
 void setDisplay(bool onoff) {
