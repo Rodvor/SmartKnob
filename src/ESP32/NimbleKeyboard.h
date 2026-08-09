@@ -6,6 +6,7 @@
 #include <NimBLEHIDDevice.h>
 #include <HIDTypes.h>
 #include <LittleFS.h>
+#include <freertos/queue.h>
 
 // Consumer key codes
 #define KEY_MEDIA_VOLUME_UP      0xE9
@@ -109,6 +110,7 @@ public:
     logEvent("Connected");
     // Let macOS choose its own connection parameters — requesting specific params
     // causes renegotiation conflicts that produce 0x222 timeouts and temporary slowness.
+    pServer->updateConnParams(info.getConnHandle(), 12, 24, 0, 400); // Test
   }
 
   void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
@@ -146,6 +148,9 @@ public:
 
     hid->startServices();
 
+    reportQueue = xQueueCreate(64, sizeof(HidReport));
+    xTaskCreatePinnedToCore(reportTask, "hid_report", 4096, this, 2, nullptr, 0);
+
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
     adv->setAppearance(HID_KEYBOARD);
     adv->addServiceUUID(hid->getHidService()->getUUID());
@@ -159,28 +164,21 @@ public:
 
   // Send keyboard report: modifier byte + up to 6 keycodes
   void sendKeyReport(uint8_t modifiers, uint8_t key1 = 0, uint8_t key2 = 0) {
-    if (!connected) return;
+    if (!connected || !reportQueue) return;
+    if (uxQueueSpacesAvailable(reportQueue) < 2) return; // never send a press without its release
     uint8_t report[8] = {modifiers, 0, key1, key2, 0, 0, 0, 0};
-    input->setValue(report, sizeof(report));
-    input->notify();
-    vTaskDelay(pdMS_TO_TICKS(10));
-    // Release
-    memset(report, 0, sizeof(report));
-    input->setValue(report, sizeof(report));
-    input->notify();
+    enqueueReport(input, report, sizeof(report));
+    uint8_t release[8] = {0};
+    enqueueReport(input, release, sizeof(release));
   }
-
   // Send consumer control key
   void sendConsumer(uint16_t key) {
-    if (!connected) return;
+    if (!connected || !reportQueue) return;
+    if (uxQueueSpacesAvailable(reportQueue) < 2) return;
     uint8_t report[2] = {(uint8_t)(key & 0xFF), (uint8_t)(key >> 8)};
-    consumer->setValue(report, sizeof(report));
-    consumer->notify();
-    vTaskDelay(pdMS_TO_TICKS(10));
-    // Release
+    enqueueReport(consumer, report, sizeof(report));
     uint8_t release[2] = {0, 0};
-    consumer->setValue(release, sizeof(release));
-    consumer->notify();
+    enqueueReport(consumer, release, sizeof(release));
   }
 
   void volumeUp()   { sendVolumeKey(KEY_MEDIA_VOLUME_UP); }
@@ -224,15 +222,47 @@ public:
   }
 
 private:
+  struct HidReport {
+    NimBLECharacteristic* chr;
+    uint8_t data[8];
+    uint8_t len;
+  };
+
+  QueueHandle_t reportQueue = nullptr;
+
+  static void reportTask(void* param) {
+    NimBLEKeyboard* self = (NimBLEKeyboard*)param;
+    HidReport r;
+    while (true) {
+      if (xQueueReceive(self->reportQueue, &r, portMAX_DELAY) == pdTRUE) {
+        if (!self->connected) continue;
+        r.chr->setValue(r.data, r.len);
+        int attempts = 0;
+        while (!r.chr->notify() && attempts < 20) { // retry until it actually sends
+          vTaskDelay(pdMS_TO_TICKS(2));
+          attempts++;
+        }
+        vTaskDelay(pdMS_TO_TICKS(4)); // small settle gap so press/release stay distinct reports
+      }
+    }
+  }
+
+  void enqueueReport(NimBLECharacteristic* chr, const uint8_t* data, uint8_t len) {
+    if (!reportQueue) return;
+    HidReport r;
+    r.chr = chr;
+    memcpy(r.data, data, len);
+    r.len = len;
+    xQueueSend(reportQueue, &r, 0); // non-blocking, safe from ISR-adjacent callers
+  }
+
   void sendVolumeKey(uint16_t key) {
-    if (!connected) return;
-    uint8_t report[8] = {MOD_LEFT_SHIFT | MOD_LEFT_ALT, 0, 0, 0, 0, 0, 0, 0};
-    input->setValue(report, sizeof(report));
-    input->notify();
-    delay(5);
+    if (!connected || !reportQueue) return;
+    if (uxQueueSpacesAvailable(reportQueue) < 4) return; // full 4-report sequence or nothing
+    uint8_t mod[8] = {MOD_LEFT_SHIFT | MOD_LEFT_ALT, 0, 0, 0, 0, 0, 0, 0};
+    enqueueReport(input, mod, sizeof(mod));
     sendConsumer(key);
-    memset(report, 0, sizeof(report));
-    input->setValue(report, sizeof(report));
-    input->notify();
+    uint8_t release[8] = {0};
+    enqueueReport(input, release, sizeof(release));
   }
 };
