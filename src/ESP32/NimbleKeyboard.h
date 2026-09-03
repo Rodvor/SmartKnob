@@ -4,6 +4,10 @@
 #include <NimBLEServer.h>
 #include <NimBLEUtils.h>
 #include <NimBLEHIDDevice.h>
+#if __has_include(<NimBLECppVersion.h>)
+#include <NimBLECppVersion.h>
+#define SMARTKNOB_HAS_NIMBLE_VERSION_HEADER 1
+#endif
 #include <HIDTypes.h>
 #include <LittleFS.h>
 #include <atomic>
@@ -175,7 +179,13 @@ public:
     input->setValue(keyboardRelease, sizeof(keyboardRelease));
     consumer->setValue(consumerRelease, sizeof(consumerRelease));
 
+    // NimBLE 2.4+ starts all registered services through the server. Older
+    // versions require the HID-specific startServices() call instead.
+#ifdef SMARTKNOB_HAS_NIMBLE_VERSION_HEADER
+    pServer->start();
+#else
     hid->startServices();
+#endif
 
     reportQueue = xQueueCreate(32, sizeof(HidAction));
     xTaskCreatePinnedToCore(reportTask, "hid_report", 4096, this, 2, nullptr, 0);
