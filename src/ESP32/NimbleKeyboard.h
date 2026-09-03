@@ -6,6 +6,7 @@
 #include <NimBLEHIDDevice.h>
 #include <HIDTypes.h>
 #include <LittleFS.h>
+#include <atomic>
 #include <freertos/queue.h>
 
 // Consumer key codes
@@ -64,20 +65,22 @@ static const uint8_t hidReportDescriptor[] = {
 #define MOD_LEFT_ALT    0x04
 #define MOD_LEFT_GUI    0x08
 
+// Keep Shift+Option held between volume ticks. They are released after this
+// much time without a new volume turn.
+static constexpr uint32_t VOLUME_MODIFIER_IDLE_RELEASE_MS = 500;
+
 // Key codes (subset)
 #define HID_KEY_F13  0x68
 #define HID_KEY_F14  0x69
 #define HID_KEY_F15  0x6A
 
-class NimBLEKeyboard : public NimBLEServerCallbacks {
+class NimBLEKeyboard : public NimBLEServerCallbacks, public NimBLECharacteristicCallbacks {
 public:
   NimBLEServer*    pServer    = nullptr;
   NimBLEHIDDevice* hid        = nullptr;
   NimBLECharacteristic* input = nullptr;
   NimBLECharacteristic* consumer = nullptr;
-  bool connected = false;
 
-  uint16_t connHandle = 0;
   uint32_t connectedSince = 0;
   bool loggingReady = false;
 
@@ -103,24 +106,42 @@ public:
   }
 
   void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
-    connected = true;
-    connHandle = info.getConnHandle();
+    connected.store(false);
+    keyboardSubscribed.store(false);
+    consumerSubscribed.store(false);
+    connectionGeneration.fetch_add(1);
+    if (reportQueue) xQueueReset(reportQueue);
+    connHandle.store(info.getConnHandle());
     connectedSince = millis();
+    connected.store(true);
     Serial.println("BLE connected");
     logEvent("Connected");
-    // Let macOS choose its own connection parameters — requesting specific params
-    // causes renegotiation conflicts that produce 0x222 timeouts and temporary slowness.
-    pServer->updateConnParams(info.getConnHandle(), 12, 24, 0, 400); // Test
+    // Let the host choose connection parameters. Forcing a renegotiation here has
+    // caused timeout disconnects with macOS.
   }
 
   void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
-    connected = false;
+    connected.store(false);
+    keyboardSubscribed.store(false);
+    consumerSubscribed.store(false);
+    connectionGeneration.fetch_add(1);
+    if (reportQueue) xQueueReset(reportQueue);
     uint32_t duration = (millis() - connectedSince) / 1000;
     char buf[80];
     snprintf(buf, sizeof(buf), "Disconnected reason=0x%02X, duration=%lus", reason, duration);
     Serial.println(buf);
     logEvent(buf);
-    NimBLEDevice::startAdvertising();
+  }
+
+  void onSubscribe(NimBLECharacteristic* chr, NimBLEConnInfo& info, uint16_t subValue) override {
+    const bool notificationsEnabled = (subValue & 0x01) != 0;
+    if (chr == input) {
+      keyboardSubscribed.store(notificationsEnabled);
+      if (notificationsEnabled) enqueueRelease(input, 8);
+    } else if (chr == consumer) {
+      consumerSubscribed.store(notificationsEnabled);
+      if (notificationsEnabled) enqueueRelease(consumer, 2);
+    }
   }
 
   void begin(const char* deviceName = "Haptic Knob") {
@@ -135,6 +156,7 @@ public:
 
     pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(this);
+    pServer->advertiseOnDisconnect(true);
 
     hid = new NimBLEHIDDevice(pServer);
     hid->setManufacturer("DIY");
@@ -145,10 +167,17 @@ public:
 
     input = hid->getInputReport(1);
     consumer = hid->getInputReport(2);
+    input->setCallbacks(this);
+    consumer->setCallbacks(this);
+
+    uint8_t keyboardRelease[8] = {0};
+    uint8_t consumerRelease[2] = {0};
+    input->setValue(keyboardRelease, sizeof(keyboardRelease));
+    consumer->setValue(consumerRelease, sizeof(consumerRelease));
 
     hid->startServices();
 
-    reportQueue = xQueueCreate(64, sizeof(HidReport));
+    reportQueue = xQueueCreate(32, sizeof(HidAction));
     xTaskCreatePinnedToCore(reportTask, "hid_report", 4096, this, 2, nullptr, 0);
 
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
@@ -160,25 +189,20 @@ public:
     logEvent("Advertising started");
   }
 
-  bool isConnected() { return connected; }
+  bool isConnected() const { return connected.load(); }
 
   // Send keyboard report: modifier byte + up to 6 keycodes
   void sendKeyReport(uint8_t modifiers, uint8_t key1 = 0, uint8_t key2 = 0) {
-    if (!connected || !reportQueue) return;
-    if (uxQueueSpacesAvailable(reportQueue) < 2) return; // never send a press without its release
+    if (!connected.load() || !keyboardSubscribed.load() || !reportQueue) return;
     uint8_t report[8] = {modifiers, 0, key1, key2, 0, 0, 0, 0};
-    enqueueReport(input, report, sizeof(report));
-    uint8_t release[8] = {0};
-    enqueueReport(input, release, sizeof(release));
+    enqueueAction(input, report, sizeof(report));
   }
+
   // Send consumer control key
   void sendConsumer(uint16_t key) {
-    if (!connected || !reportQueue) return;
-    if (uxQueueSpacesAvailable(reportQueue) < 2) return;
+    if (!connected.load() || !consumerSubscribed.load() || !reportQueue) return;
     uint8_t report[2] = {(uint8_t)(key & 0xFF), (uint8_t)(key >> 8)};
-    enqueueReport(consumer, report, sizeof(report));
-    uint8_t release[2] = {0, 0};
-    enqueueReport(consumer, release, sizeof(release));
+    enqueueAction(consumer, report, sizeof(report));
   }
 
   void volumeUp()   { sendVolumeKey(KEY_MEDIA_VOLUME_UP); }
@@ -222,47 +246,158 @@ public:
   }
 
 private:
-  struct HidReport {
+  struct HidAction {
     NimBLECharacteristic* chr;
     uint8_t data[8];
     uint8_t len;
+    uint32_t generation;
+    bool releaseAfter;
+    uint8_t modifiers;
+    uint32_t queuedAt;
   };
 
+  std::atomic<bool> connected{false};
+  std::atomic<bool> keyboardSubscribed{false};
+  std::atomic<bool> consumerSubscribed{false};
+  std::atomic<uint16_t> connHandle{BLE_HS_CONN_HANDLE_NONE};
+  std::atomic<uint32_t> connectionGeneration{0};
   QueueHandle_t reportQueue = nullptr;
 
   static void reportTask(void* param) {
     NimBLEKeyboard* self = (NimBLEKeyboard*)param;
-    HidReport r;
+    HidAction action;
+    HidAction modifierAction{};
+    bool modifiersHeld = false;
+    uint8_t heldModifiers = 0;
+
+    auto releaseModifiers = [&]() {
+      if (!modifiersHeld) return;
+      uint8_t keyboardRelease[8] = {0};
+      self->notifyWhenReady(modifierAction, self->input,
+                            keyboardRelease, sizeof(keyboardRelease));
+      modifiersHeld = false;
+      heldModifiers = 0;
+    };
+
     while (true) {
-      if (xQueueReceive(self->reportQueue, &r, portMAX_DELAY) == pdTRUE) {
-        if (!self->connected) continue;
-        r.chr->setValue(r.data, r.len);
-        int attempts = 0;
-        while (!r.chr->notify() && attempts < 20) { // retry until it actually sends
-          vTaskDelay(pdMS_TO_TICKS(2));
-          attempts++;
+      TickType_t waitTicks = portMAX_DELAY;
+      if (modifiersHeld) {
+        const uint32_t idleMs = millis() - modifierAction.queuedAt;
+        if (idleMs >= VOLUME_MODIFIER_IDLE_RELEASE_MS) {
+          waitTicks = 0;
+        } else {
+          waitTicks = pdMS_TO_TICKS(VOLUME_MODIFIER_IDLE_RELEASE_MS - idleMs);
+          if (waitTicks == 0) waitTicks = 1;
         }
-        vTaskDelay(pdMS_TO_TICKS(4)); // small settle gap so press/release stay distinct reports
       }
+
+      if (xQueueReceive(self->reportQueue, &action, waitTicks) != pdTRUE) {
+        releaseModifiers();
+        continue;
+      }
+
+      if (!self->actionIsCurrent(action)) {
+        if (modifiersHeld &&
+            !self->reportIsReady(modifierAction, self->input)) {
+          // A reconnect will send a neutral report when macOS subscribes again.
+          modifiersHeld = false;
+          heldModifiers = 0;
+        }
+        continue;
+      }
+
+      // Never let the fine-volume modifiers affect another kind of action.
+      if (modifiersHeld &&
+          (action.modifiers == 0 || action.modifiers != heldModifiers ||
+           action.generation != modifierAction.generation)) {
+        releaseModifiers();
+        vTaskDelay(pdMS_TO_TICKS(4));
+      }
+
+      if (action.modifiers != 0) {
+        if (!modifiersHeld) {
+          uint8_t modifierReport[8] = {action.modifiers, 0, 0, 0, 0, 0, 0, 0};
+          if (!self->notifyWhenReady(action, self->input,
+                                     modifierReport, sizeof(modifierReport))) {
+            continue;
+          }
+          modifiersHeld = true;
+          heldModifiers = action.modifiers;
+          vTaskDelay(pdMS_TO_TICKS(8));
+        }
+
+        // Use the time the knob event was detected, rather than the time it
+        // happened to reach the front of the BLE queue.
+        modifierAction = action;
+      }
+
+      const bool pressSent = self->notifyWhenReady(action, action.chr, action.data, action.len);
+      if (!pressSent) {
+        if (action.modifiers != 0) releaseModifiers();
+        continue;
+      }
+
+      if (!action.releaseAfter) continue;
+
+      // Keep press and release as distinct HID reports. Once a press has been
+      // accepted, do not process another action until its release is accepted.
+      vTaskDelay(pdMS_TO_TICKS(8));
+      uint8_t release[8] = {0};
+      self->notifyWhenReady(action, action.chr, release, action.len);
+      vTaskDelay(pdMS_TO_TICKS(4));
     }
   }
 
-  void enqueueReport(NimBLECharacteristic* chr, const uint8_t* data, uint8_t len) {
+  bool reportIsReady(const HidAction& action, NimBLECharacteristic* chr) const {
+    if (!connected.load() || action.generation != connectionGeneration.load()) return false;
+    if (chr == input) return keyboardSubscribed.load();
+    if (chr == consumer) return consumerSubscribed.load();
+    return false;
+  }
+
+  bool actionIsCurrent(const HidAction& action) const {
+    if (!reportIsReady(action, action.chr)) return false;
+    return action.modifiers == 0 || reportIsReady(action, input);
+  }
+
+  bool notifyWhenReady(const HidAction& action, NimBLECharacteristic* chr,
+                       const uint8_t* data, uint8_t len) {
+    while (reportIsReady(action, chr)) {
+      const uint16_t handle = connHandle.load();
+      if (chr->notify(data, len, handle)) return true;
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    return false;
+  }
+
+  void enqueueAction(NimBLECharacteristic* chr, const uint8_t* data, uint8_t len,
+                     uint8_t modifiers = 0) {
     if (!reportQueue) return;
-    HidReport r;
-    r.chr = chr;
-    memcpy(r.data, data, len);
-    r.len = len;
-    xQueueSend(reportQueue, &r, 0); // non-blocking, safe from ISR-adjacent callers
+    HidAction action{};
+    action.chr = chr;
+    memcpy(action.data, data, len);
+    action.len = len;
+    action.generation = connectionGeneration.load();
+    action.releaseAfter = true;
+    action.modifiers = modifiers;
+    action.queuedAt = millis();
+    xQueueSend(reportQueue, &action, 0);
+  }
+
+  void enqueueRelease(NimBLECharacteristic* chr, uint8_t len) {
+    if (!connected.load() || !reportQueue) return;
+    HidAction action{};
+    action.chr = chr;
+    action.len = len;
+    action.generation = connectionGeneration.load();
+    action.releaseAfter = false;
+    xQueueSendToFront(reportQueue, &action, 0);
   }
 
   void sendVolumeKey(uint16_t key) {
-    if (!connected || !reportQueue) return;
-    if (uxQueueSpacesAvailable(reportQueue) < 4) return; // full 4-report sequence or nothing
-    uint8_t mod[8] = {MOD_LEFT_SHIFT | MOD_LEFT_ALT, 0, 0, 0, 0, 0, 0, 0};
-    enqueueReport(input, mod, sizeof(mod));
-    sendConsumer(key);
-    uint8_t release[8] = {0};
-    enqueueReport(input, release, sizeof(release));
+    if (!connected.load() || !keyboardSubscribed.load() ||
+        !consumerSubscribed.load() || !reportQueue) return;
+    uint8_t report[2] = {(uint8_t)(key & 0xFF), (uint8_t)(key >> 8)};
+    enqueueAction(consumer, report, sizeof(report), MOD_LEFT_SHIFT | MOD_LEFT_ALT);
   }
 };
