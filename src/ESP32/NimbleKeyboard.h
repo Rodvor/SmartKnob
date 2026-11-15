@@ -179,7 +179,7 @@ public:
                   NimBLEUtils::returnCodeToString(code));
   }
 
-  bool begin(const char* deviceName = "Haptic Knob") {
+  bool begin(const char* deviceName = "Haptic Knob", void (*addServices)(NimBLEServer*) = nullptr) {
     logQueue = xQueueCreate(24, sizeof(LogEntry));
     reportQueue = xQueueCreate(8, sizeof(HidAction));
     if (!logQueue || !reportQueue) return false;
@@ -214,6 +214,8 @@ public:
     input->setValue(keyboardRelease, sizeof(keyboardRelease));
     consumer->setValue(consumerRelease, sizeof(consumerRelease));
 
+    if (addServices) addServices(pServer);
+
     // NimBLE 2.4+ starts all registered services through the server. Older
     // versions require the HID-specific startServices() call instead.
 #ifdef SMARTKNOB_HAS_NIMBLE_VERSION_HEADER
@@ -241,6 +243,8 @@ public:
   void cancelPendingInputs() {
     if (reportQueue) xQueueReset(reportQueue);
   }
+
+  std::atomic<bool> companionActive{false};
 
   bool isConnected() const { return connected.load(); }
 
@@ -453,7 +457,7 @@ private:
     const uint32_t generation = connectionGeneration.load();
     const uint32_t age = now - connectedSince.load();
     if (generation == recoveryGeneration.load() ||
-        (!isReady() && age >= BLE_HID_SETUP_TIMEOUT_MS)) {
+        (!isReady() && !companionActive.load() && age >= BLE_HID_SETUP_TIMEOUT_MS)) {
       // A link without usable HID reports must not stay silently connected.
       // Keep the bond; let macOS reconnect and restore encryption/subscriptions.
       recoveryGeneration.store(generation);

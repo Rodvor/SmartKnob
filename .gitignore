@@ -36,3 +36,7 @@
 *.mov
 .DS_Store
 notes
+# Local companion builds
+build/
+.build/
+.swiftpm/

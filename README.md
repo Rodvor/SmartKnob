@@ -2,6 +2,40 @@
 
 Still in development.
 
+## Configurable knob and macOS companion (15.11.2026)
+
+The current firmware adds saved page configuration, bounded volume/brightness
+controls with host feedback, configurable Discord HID shortcuts, display sleep,
+and cached sprite rendering. A native SwiftUI menu bar app provides a full
+settings window and Apply/readback flow.
+
+Build the app with `./scripts/build-macos.sh`. See
+[the companion setup and protocol guide](docs/COMPANION.md) for installation,
+capabilities, limitations and hardware checks. Editable defaults now live in
+`src/ESP32/KnobConfig.h`; `menu_config.h` contains only legacy display IDs.
+
+Flashed through Arduino IDE to the connected ESP32 on **15.11.2026**. The
+uploader verified the flash hash and reset the device. Runtime diagnostics
+confirmed encrypted Bluetooth with both HID subscriptions ready, zero notification
+failures, and 5,874 successful touch reads with zero errors. Physical haptics and
+companion-app control still need user testing. The sections below retain the
+previous firmware history.
+
+
+### Performance revision (15.11.2026)
+
+Volume/brightness now offer Low (2%) and High (4%). General settings have a
+separate app page. Torque calculation, detent tracking and damped centring now
+run in the dedicated motor task, independently of screen rendering. Normal
+screen motion updates only the old/new marker rectangles; the full background
+is cached. Runtime `[Perf]` logs report motor-loop rate and maximum cycle gap.
+The optimised revision was flashed and hash-verified: observed motor rate was
+1,000 Hz, worst recorded interval 2 ms, and touch reported 955 successful reads
+with zero errors after retaining its original 100 kHz timing.
+Page-entry centring now hands over to normal detents after manual override or
+timeout, and targets the nearest valid detent instead of stopping between
+notches (notably 50% with the 4% setting).
+
 ## Build dependencies
 
 The following older versions are the **known-good fallback**:

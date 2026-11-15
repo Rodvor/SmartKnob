@@ -74,6 +74,18 @@ int main() {
   testNow += 1000;
   knob.poll();
   assert(!knob.isConnected());
+  // An encrypted companion-only session need not subscribe to HID reports.
+  testLinkPresent = true;
+  knob.onConnect(knob.pServer, info);
+  knob.companionActive.store(true);
+  auto before = knob.pServer->disconnects;
+  testNow += 16000;
+  knob.poll();
+  assert(knob.pServer->disconnects == before);
+  knob.companionActive.store(false);
+  testNow += 1000;
+  knob.poll();
+  assert(knob.pServer->disconnects == before + 1);
   puts("PASS: reordered/missing connect events, subscription restore, stale reports, "
        "incomplete-link recovery, advertising recovery, deferred single parameter request, "
        "nonblocking callback logging, failed key-up recovery, missing disconnect");
