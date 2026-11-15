@@ -55,6 +55,14 @@ struct ConfigurationView: View {
             Divider()
             HSplitView {
                 VStack(alignment: .leading, spacing: 14) {
+                    Button { selected = 4 } label: {
+                        Label("General", systemImage: "gearshape")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .contentShape(Rectangle())
+                    }.buttonStyle(.plain).fontWeight(selected == 4 ? .semibold : .regular)
+                        .background(selected == 4 ? Color.accentColor.opacity(0.13) : .clear, in: RoundedRectangle(cornerRadius: 9))
+                    Divider()
                     Text("PAGES").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     Text("Order follows your swipes.").font(.caption).foregroundStyle(.secondary)
                     ForEach(Array(model.draft.order.enumerated()), id: \.element) { index, id in
@@ -62,6 +70,7 @@ struct ConfigurationView: View {
                         HStack(spacing: 8) {
                             Button { selected = id } label: {
                                 Label(page.name, systemImage: page.icon).frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
                             }.buttonStyle(.plain).fontWeight(selected == id ? .semibold : .regular)
                             if index < model.draft.count {
                                 Button { model.draft.order.swapAt(index,index-1) } label: { Image(systemName: "chevron.up") }
@@ -71,12 +80,9 @@ struct ConfigurationView: View {
                             } else { Text("Off").font(.caption).foregroundStyle(.secondary) }
                         }.buttonStyle(.borderless).padding(10)
                             .background(selected == id ? Color.accentColor.opacity(0.13) : .clear, in: RoundedRectangle(cornerRadius: 9))
+                            .contentShape(Rectangle())
+                            .onTapGesture { selected = id }
                     }
-                    Divider()
-                    Button { selected = 4 } label: {
-                        Label("General", systemImage: "gearshape").frame(maxWidth: .infinity, alignment: .leading)
-                    }.buttonStyle(.plain).padding(10)
-                        .background(selected == 4 ? Color.accentColor.opacity(0.13) : .clear, in: RoundedRectangle(cornerRadius: 9))
                     Spacer()
                     Label("\(model.currentPage) on knob",systemImage: "circle.dotted").font(.caption)
                     Label(model.hidReady ? "Keyboard HID ready" : "Keyboard HID not ready",systemImage: "keyboard").font(.caption).foregroundStyle(.secondary)
@@ -114,10 +120,17 @@ struct ConfigurationView: View {
             GroupBox {
                 VStack(alignment: .leading,spacing: 18) {
                     if page.bounded {
-                        Picker("Change per notch",selection: $model.draft.pages[selected].step) {
-                            Text("Low (2%)").tag(2)
-                            Text("High (4%)").tag(4)
+                        HStack {
+                            Text("Change per notch")
+                            Spacer()
+                            HStack(spacing: 2) {
+                                stepOption("Low", step: 2)
+                                stepOption("High", step: 4)
+                            }.padding(3)
+                                .background(.quaternary, in: Capsule())
                         }
+                        Text("Low: 2% per notch · High: 4% per notch")
+                            .font(.caption).foregroundStyle(.secondary)
                         Text("\(100/model.draft.pages[selected].step + 1) positions, including 0% and 100%.").font(.caption).foregroundStyle(.secondary)
                         intSlider("Travel",value: $model.draft.pages[selected].arc,range: 90...300,suffix: "°")
                         ArcPreview(arc: model.draft.pages[selected].arc, step: model.draft.pages[selected].step)
@@ -129,7 +142,10 @@ struct ConfigurationView: View {
                         Text("Three fixed positions: unmute, mute and deafen. Tap to disconnect.").font(.callout)
                     }
                     intSlider("Detent strength",value: $model.draft.pages[selected].strength,range: 0...80,suffix: "", display: { "\(Int((Double($0)/80*100).rounded()))%" })
-                    intSlider("Detent sharpness",value: $model.draft.pages[selected].buildup,range: 1...200,suffix: "%")
+                    intSlider("Detent sharpness",value: Binding(
+                        get: { model.draft.pages[selected].buildup / 2 },
+                        set: { model.draft.pages[selected].buildup = max(1, $0 * 2) }
+                    ),range: 0...100,suffix: "%")
                     if page.bounded { Text("Endpoint resistance uses the same strength. These are motor-generated stops; sufficient hand force can overcome them.").font(.caption).foregroundStyle(.secondary) }
                 }.padding(12)
             }
@@ -196,6 +212,18 @@ struct ConfigurationView: View {
                 }
             }.padding(10)
         }
+    }
+    func stepOption(_ title: String, step: Int) -> some View {
+        let active = model.draft.pages[selected].step == step
+        return Button { model.draft.pages[selected].step = step } label: {
+            Text(title).fontWeight(active ? .semibold : .regular)
+                .frame(width: 62).padding(.vertical, 6)
+                .foregroundStyle(active ? Color.white : Color.primary)
+                .background(active ? Color.accentColor : .clear, in: Capsule())
+                .contentShape(Capsule())
+        }.buttonStyle(.plain)
+            .accessibilityLabel("\(title), \(step)% per notch")
+            .accessibilityAddTraits(active ? .isSelected : [])
     }
     func capability(_ title: String,value: Double?) -> some View {
         HStack { Text(title); Spacer(); Text(value.map { "\(Int(($0*100).rounded()))%" } ?? "Unavailable").foregroundStyle(value == nil ? .orange : .secondary) }
