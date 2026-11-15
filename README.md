@@ -14,7 +14,7 @@ The following older versions are the **known-good fallback**:
 | [TFT_eSPI](https://github.com/Bodmer/TFT_eSPI) | 2.5.43 | Install through Arduino Library Manager; configuration below is required |
 | [Simple FOC](https://docs.simplefoc.com) | 2.3.5 | Install through Arduino Library Manager |
 
-`Wire`, `LittleFS`, and FreeRTOS are supplied by the Arduino-ESP32 board package and do not need separate installation.
+`Wire` and FreeRTOS are supplied by the Arduino-ESP32 board package and do not need separate installation.
 
 To restore the known-good versions with Arduino CLI:
 
@@ -41,6 +41,94 @@ The complete upgraded set compiles successfully for `ESP32 Dev Module`. ESP32 co
 NimBLE-Arduino 2.4 and newer starts registered HID services through `NimBLEServer::start()`. Its old `NimBLEHIDDevice::startServices()` method is deprecated and scheduled for removal. `NimbleKeyboard.h` detects the NimBLE generation: it uses the server method with the current library, but retains the HID-specific call when compiling against the fallback NimBLE 2.3.9.
 
 Compilation and flash verification prove API compatibility and image integrity, but not the hardware behavior. Before making the newer versions the new baseline, test Bluetooth pairing/reconnection, fine volume adjustment, display output, motor direction, and haptic torque on the physical device. Simple FOC 2.4.0 changes ESP32 PWM safety/timing and velocity calculation, while ESP32 core 3.3.11 moves from ESP-IDF 5.4 to 5.5.5.
+
+### Bluetooth recovery and diagnostics
+
+The 2026-09-27 connection fix handles authentication and restored HID subscriptions
+arriving before, or without, `onConnect()`. A later connection callback preserves
+those subscriptions. Input is ready only when the link is encrypted and both
+keyboard and consumer notifications are enabled.
+
+Bluetooth callbacks queue diagnostics in RAM; `poll()` prints them over USB at
+115200 baud. Runtime LittleFS logging and the startup log dump were removed so
+connection callbacks no longer perform flash writes. Capture the serial output
+when diagnosing a problem; new logs do not survive a power cycle. Opening this
+board's USB serial port can reset it.
+
+`poll()` runs while waiting for the first connection and during normal operation.
+It retries stopped advertising, clears connection state if the stack has lost the
+link, and disconnects an incomplete HID link after 15 seconds so macOS can retry
+with the existing bond. Failed key-release reports also trigger recovery before
+more presses are sent. Pairings are not erased.
+
+Once a connection has been ready for setup and at least five seconds have elapsed
+since connection detection, it requests a 15–30 ms interval, zero peripheral
+latency, and a 6-second supervision timeout. This is a single delayed request per
+connection; macOS may reject it. These values satisfy
+[Apple's connection parameter guidance](https://developer.apple.com/library/archive/qa/qa1931/_index.html).
+
+A healthy diagnostic line has `connected=1 encrypted=1 ready=1 keyboard=1 consumer=1`.
+`sent` counts notifications accepted by the local stack, not proof that macOS
+acted on them. Check actual volume/media/brightness behavior as well.
+
+Host regression checks (requires a C++17 compiler):
+
+```sh
+c++ -std=c++17 -Itests/ble_fakes tests/ble_lifecycle.cpp -o /tmp/smartknob-ble-test
+/tmp/smartknob-ble-test
+```
+
+The checks exercise reordered/missing callbacks, subscription restoration,
+stale reports, incomplete-link and advertising recovery, failed key releases,
+and delayed parameter negotiation. They do not simulate radio behavior.
+
+### Input stability and complete key releases (2026-11-03)
+
+Built and flashed to the connected ESP32-D0WD-V3 on 2026-11-03. The uploader
+verified the written image, and serial output confirmed the new build booted
+and restored encrypted keyboard and consumer subscriptions. Both host regression
+suites pass. This does not replace testing physical turns and taps.
+
+Rotation uses a 15% notch-width hysteresis margin beyond the midpoint, with
+150 ms of settling after menu centering. Encoder reads and motor updates share
+one task. Touch startup probes the CST816 at address `0x15` on `Wire` first
+(the bus used by the earlier working firmware), then `Wire1`. The selected bus
+and chip ID are logged. On the connected knob, runtime diagnostics confirmed
+`Wire` on GPIO 21/22 with chip ID `0xB6`; GPIO 19/18 in `pin_config.h` do not
+match its actual touch wiring. Shared encoder/touch transactions are serialized.
+Polling disables CST816 automatic sleep through register `0xFE`.
+
+Touch recovery correction: the initial update assumed the controller used
+`Wire1` solely from the pin definitions and introduced restrictive duration
+checks. Touch now accepts short taps and slow swipes. Failed reads while idle
+do not block the next touch; failed reads during a gesture discard that gesture
+until a real release. A 300 ms debounce still prevents repeated activations.
+Serial `[Touch]` diagnostics report valid reads, errors, and recognized gestures.
+The correction was flashed and verified; runtime sampling reported zero touch
+read errors, and the user confirmed both swipes and taps work.
+
+Each queued input owns its complete press/release sequence. Fine volume still
+uses Shift+Option, but releases both modifiers after every tick. Report phases
+are spaced by 30 ms. The queue holds at most eight actions, expires unstarted
+presses older than 250 ms, and clears waiting actions when changing menus.
+Releases do not expire or depend on free queue slots. Failed releases and
+asynchronous notification errors block further presses and trigger reconnect
+recovery. During very fast turns or a congested link, excess ticks may be dropped
+to avoid delayed adjustments.
+
+Additional host regression checks:
+
+```sh
+c++ -std=c++17 -Itests/ble_fakes tests/input_actions.cpp -o /tmp/smartknob-input-test
+/tmp/smartknob-input-test
+c++ -std=c++17 tests/touch_input.cpp -o /tmp/smartknob-touch-test
+/tmp/smartknob-touch-test
+```
+
+These cover rotation hysteresis and direction across wraparound, complete
+keyboard/volume release sequences, stale inputs, queue overload and cancellation,
+and release/error recovery. Physical movement and host-side HID behavior still
+need checking on the device.
 
 ### Duplicate library files after an update
 

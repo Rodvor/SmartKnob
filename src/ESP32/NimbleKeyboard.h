@@ -9,8 +9,9 @@
 #define SMARTKNOB_HAS_NIMBLE_VERSION_HEADER 1
 #endif
 #include <HIDTypes.h>
-#include <LittleFS.h>
+#include <cstdarg>
 #include <atomic>
+#include <mutex>
 #include <freertos/queue.h>
 
 // Consumer key codes
@@ -69,9 +70,14 @@ static const uint8_t hidReportDescriptor[] = {
 #define MOD_LEFT_ALT    0x04
 #define MOD_LEFT_GUI    0x08
 
-// Keep Shift+Option held between volume ticks. They are released after this
-// much time without a new volume turn.
-static constexpr uint32_t VOLUME_MODIFIER_IDLE_RELEASE_MS = 500;
+// Each action owns its press and release, including fine-volume modifiers.
+static constexpr uint32_t HID_PHASE_MS = 30;
+static constexpr uint32_t HID_ACTION_MAX_AGE_MS = 250;
+static constexpr uint32_t BLE_DIAGNOSTIC_INTERVAL_MS = 15000;
+static constexpr uint32_t BLE_NOTIFY_RETRY_TIMEOUT_MS = 250;
+static constexpr uint32_t BLE_LINK_CHECK_INTERVAL_MS = 1000;
+static constexpr uint32_t BLE_HID_SETUP_TIMEOUT_MS = 15000;
+static constexpr uint32_t BLE_PARAM_REQUEST_DELAY_MS = 5000;
 
 // Key codes (subset)
 #define HID_KEY_F13  0x68
@@ -85,85 +91,114 @@ public:
   NimBLECharacteristic* input = nullptr;
   NimBLECharacteristic* consumer = nullptr;
 
-  uint32_t connectedSince = 0;
-  bool loggingReady = false;
-
-  static const size_t MAX_LOG_SIZE = 8192;
-
-  void logEvent(const char* msg) {
-    if (!loggingReady) return;
-    fs::File f = LittleFS.open("/ble_log.txt", "a");
-    if (!f) return;
-    // Check size and truncate if too large
-    if (f.size() > MAX_LOG_SIZE) {
-      f.close();
-      LittleFS.remove("/ble_log.txt");
-      f = LittleFS.open("/ble_log.txt", "a");
-      if (!f) return;
-      f.println("[log truncated]");
-    }
-    unsigned long s = millis() / 1000;
-    unsigned long m = s / 60;
-    unsigned long h = m / 60;
-    f.printf("[%02lu:%02lu:%02lu] %s\n", h % 100, m % 60, s % 60, msg);
-    f.close();
-  }
-
+  // Callbacks run on the Bluetooth host task. Never write flash or wait for
+  // Serial here: queue diagnostics in RAM and drain them from poll().
   void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
-    connected.store(false);
-    keyboardSubscribed.store(false);
-    consumerSubscribed.store(false);
-    connectionGeneration.fetch_add(1);
-    if (reportQueue) xQueueReset(reportQueue);
-    connHandle.store(info.getConnHandle());
-    connectedSince = millis();
-    connected.store(true);
-    Serial.println("BLE connected");
-    logEvent("Connected");
-    // Let the host choose connection parameters. Forcing a renegotiation here has
-    // caused timeout disconnects with macOS.
+    std::lock_guard<std::mutex> lock(connectionMutex);
+    adoptConnection(info);
+    printConnectionInfo("connected", info);
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "Connected handle=%u interval=%.2fms latency=%u timeout=%ums bonded=%u encrypted=%u",
+             info.getConnHandle(), info.getConnInterval() * 1.25f,
+             info.getConnLatency(), info.getConnTimeout() * 10,
+             info.isBonded(), info.isEncrypted());
+    logEvent(buf);
+    // Parameter negotiation is deferred until pairing and subscriptions settle.
   }
 
   void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
-    connected.store(false);
-    keyboardSubscribed.store(false);
-    consumerSubscribed.store(false);
-    connectionGeneration.fetch_add(1);
-    if (reportQueue) xQueueReset(reportQueue);
-    uint32_t duration = (millis() - connectedSince) / 1000;
-    char buf[80];
-    snprintf(buf, sizeof(buf), "Disconnected reason=0x%02X, duration=%lus", reason, duration);
-    Serial.println(buf);
+    std::lock_guard<std::mutex> lock(connectionMutex);
+    if (connected.load() && info.getConnHandle() != connHandle.load()) return;
+    const uint32_t duration = (millis() - connectedSince.load()) / 1000;
+    clearConnection();
+    char buf[240];
+    snprintf(buf, sizeof(buf),
+             "Disconnected reason=0x%03X (%s), duration=%lus, queued=%lu sent=%lu "
+             "notify_fail=%lu status_err=%lu dropped=%lu suppressed=%lu heap=%u",
+             reason, disconnectReasonText(reason), (unsigned long)duration,
+             (unsigned long)reportsQueued.load(), (unsigned long)reportsSent.load(),
+             (unsigned long)notifyFailures.load(), (unsigned long)notifyStatusErrors.load(),
+             (unsigned long)queueDrops.load(), (unsigned long)reportsSuppressed.load(),
+             ESP.getFreeHeap());
     logEvent(buf);
   }
 
   void onSubscribe(NimBLECharacteristic* chr, NimBLEConnInfo& info, uint16_t subValue) override {
+    std::lock_guard<std::mutex> lock(connectionMutex);
     const bool notificationsEnabled = (subValue & 0x01) != 0;
+    // Bond restoration can precede onConnect(), or a late connection event can
+    // be lost after a rapid reconnect. These callbacks also identify the link.
+    if (notificationsEnabled) adoptConnection(info);
+    if (connected.load() && info.getConnHandle() != connHandle.load()) return;
+    const char* reportName = "unknown";
     if (chr == input) {
+      reportName = "keyboard";
       keyboardSubscribed.store(notificationsEnabled);
       if (notificationsEnabled) enqueueRelease(input, 8);
     } else if (chr == consumer) {
+      reportName = "consumer";
       consumerSubscribed.store(notificationsEnabled);
       if (notificationsEnabled) enqueueRelease(consumer, 2);
     }
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "Subscription report=%s value=%u notify=%u handle=%u bonded=%u encrypted=%u",
+             reportName, subValue, notificationsEnabled, info.getConnHandle(),
+             info.isBonded(), info.isEncrypted());
+    logEvent(buf);
   }
 
-  void begin(const char* deviceName = "Haptic Knob") {
-    if (LittleFS.begin(true)) {
-      loggingReady = true;
-      logEvent("Device booted");
+  void onAuthenticationComplete(NimBLEConnInfo& info) override {
+    std::lock_guard<std::mutex> lock(connectionMutex);
+    adoptConnection(info);
+    if (info.isEncrypted()) {
+      if (keyboardSubscribed.load()) enqueueRelease(input, 8);
+      if (consumerSubscribed.load()) enqueueRelease(consumer, 2);
     }
+    printConnectionInfo("authenticated", info);
+  }
 
-    NimBLEDevice::init(deviceName);
+  void onConnParamsUpdate(NimBLEConnInfo& info) override {
+    printConnectionInfo("params updated", info);
+  }
+
+  void onPhyUpdate(NimBLEConnInfo& info, uint8_t txPhy, uint8_t rxPhy) override {
+    logMessage("[BLE] PHY updated handle=%u tx=%u rx=%u",
+                  info.getConnHandle(), txPhy, rxPhy);
+  }
+
+  void onStatus(NimBLECharacteristic* chr, NimBLEConnInfo& info, int code) override {
+    notifyStatuses.fetch_add(1);
+    if (code == 0) return;
+    notifyStatusErrors.fetch_add(1);
+    if (connected.load() && info.getConnHandle() == connHandle.load())
+      recoveryGeneration.store(connectionGeneration.load());
+    logMessage("[BLE] notify status error report=%s handle=%u code=%d (%s)",
+                  reportName(chr), info.getConnHandle(), code,
+                  NimBLEUtils::returnCodeToString(code));
+  }
+
+  bool begin(const char* deviceName = "Haptic Knob") {
+    logQueue = xQueueCreate(24, sizeof(LogEntry));
+    reportQueue = xQueueCreate(8, sizeof(HidAction));
+    if (!logQueue || !reportQueue) return false;
+    logEvent("Device booted: input and release recovery build 2026-11-03");
+
+    if (!NimBLEDevice::init(deviceName)) return false;
     NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_BOND);
-    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    NimBLEDevice::setPower(9); // NimBLE 2.x expects dBm, not esp_power_level_t.
+#ifdef SMARTKNOB_HAS_NIMBLE_VERSION_HEADER
+    Serial.printf("[BLE] stack=%s arduino-esp32=%s\n",
+                  NimBLEDevice::getVersion(), ESP_ARDUINO_VERSION_STR);
+#endif
 
     pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(this);
     pServer->advertiseOnDisconnect(true);
 
     hid = new NimBLEHIDDevice(pServer);
-    hid->setManufacturer("DIY");
+    hid->setManufacturer("Hugo Minkkinen");
     hid->setPnp(0x02, 0x303A, 0x0001, 0x0100);  // Espressif VID
     hid->setHidInfo(0x00, 0x01);
 
@@ -182,35 +217,79 @@ public:
     // NimBLE 2.4+ starts all registered services through the server. Older
     // versions require the HID-specific startServices() call instead.
 #ifdef SMARTKNOB_HAS_NIMBLE_VERSION_HEADER
-    pServer->start();
+    if (!pServer->start()) return false;
 #else
     hid->startServices();
 #endif
 
-    reportQueue = xQueueCreate(32, sizeof(HidAction));
-    xTaskCreatePinnedToCore(reportTask, "hid_report", 4096, this, 2, nullptr, 0);
+    lastReportTaskActivity.store(millis());
+    if (xTaskCreatePinnedToCore(reportTask, "hid_report", 4096, this, 2,
+                              nullptr, 0) != pdPASS) return false;
 
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
     adv->setAppearance(HID_KEYBOARD);
     adv->addServiceUUID(hid->getHidService()->getUUID());
-    adv->start();
+    adv->enableScanResponse(true);
+    adv->setName(deviceName);
+    adv->setMinInterval(32); // 20 ms, also used when reconnecting.
+    adv->setMaxInterval(32);
+    logEvent(adv->start() ? "Advertising started" : "Advertising start failed; will retry");
+    return true;
+  }
 
-    Serial.println("BLE HID advertising started");
-    logEvent("Advertising started");
+  // Cancels unstarted actions only; the worker still releases its active press.
+  void cancelPendingInputs() {
+    if (reportQueue) xQueueReset(reportQueue);
   }
 
   bool isConnected() const { return connected.load(); }
 
+  bool isReady() const {
+    return connected.load() && encrypted.load() && keyboardSubscribed.load() &&
+           consumerSubscribed.load() && recoveryGeneration.load() != connectionGeneration.load();
+  }
+
+  void poll() {
+    drainLogs();
+    const uint32_t now = millis();
+    maintainConnection(now);
+    if (now - lastDiagnosticPrint < BLE_DIAGNOSTIC_INTERVAL_MS) return;
+    lastDiagnosticPrint = now;
+
+    const UBaseType_t queued = reportQueue ? uxQueueMessagesWaiting(reportQueue) : 0;
+    const uint32_t workerAge = now - lastReportTaskActivity.load();
+    Serial.printf(
+        "[BLE health] connected=%u encrypted=%u ready=%u advertising=%u "
+        "keyboard=%u consumer=%u handle=%u generation=%lu "
+        "queue=%u queued=%lu sent=%lu notify_fail=%lu statuses=%lu status_err=%lu "
+        "dropped=%lu suppressed=%lu worker_age=%lums worker_stalled=%u log_drops=%lu heap=%u\n",
+        connected.load(), encrypted.load(), isReady(), NimBLEDevice::getAdvertising()->isAdvertising(),
+        keyboardSubscribed.load(), consumerSubscribed.load(),
+        connHandle.load(), (unsigned long)connectionGeneration.load(),
+        (unsigned int)queued, (unsigned long)reportsQueued.load(),
+        (unsigned long)reportsSent.load(), (unsigned long)notifyFailures.load(),
+        (unsigned long)notifyStatuses.load(), (unsigned long)notifyStatusErrors.load(),
+        (unsigned long)queueDrops.load(), (unsigned long)reportsSuppressed.load(),
+        (unsigned long)workerAge, queued > 0 && workerAge > 1000,
+        (unsigned long)logDrops.load(), ESP.getFreeHeap());
+  }
+
   // Send keyboard report: modifier byte + up to 6 keycodes
   void sendKeyReport(uint8_t modifiers, uint8_t key1 = 0, uint8_t key2 = 0) {
-    if (!connected.load() || !keyboardSubscribed.load() || !reportQueue) return;
+    if (!isReady() || !reportQueue) {
+      reportsSuppressed.fetch_add(1);
+      return;
+    }
     uint8_t report[8] = {modifiers, 0, key1, key2, 0, 0, 0, 0};
     enqueueAction(input, report, sizeof(report));
   }
 
   // Send consumer control key
   void sendConsumer(uint16_t key) {
-    if (!connected.load() || !consumerSubscribed.load() || !reportQueue) return;
+    if (!isReady() || !reportQueue) {
+      reportsSuppressed.fetch_add(1);
+      return;
+    }
     uint8_t report[2] = {(uint8_t)(key & 0xFF), (uint8_t)(key >> 8)};
     enqueueAction(consumer, report, sizeof(report));
   }
@@ -266,100 +345,198 @@ private:
     uint32_t queuedAt;
   };
 
+  struct LogEntry {
+    uint32_t at;
+    char message[256];
+  };
+
+  // Serialize callback state with the periodic check of NimBLE's actual links.
+  // Held only for short RAM updates and connection lookups, never for I/O.
+  std::mutex connectionMutex;
   std::atomic<bool> connected{false};
+  std::atomic<bool> encrypted{false};
+  std::atomic<uint32_t> connectedSince{0};
+  std::atomic<uint32_t> recoveryGeneration{UINT32_MAX};
+  std::atomic<uint32_t> logDrops{0};
+  QueueHandle_t logQueue = nullptr;
+  uint32_t lastLinkCheck = 0;
+  uint32_t paramsRequestedGeneration = UINT32_MAX;
+  uint32_t securityRequestedGeneration = UINT32_MAX;
   std::atomic<bool> keyboardSubscribed{false};
   std::atomic<bool> consumerSubscribed{false};
   std::atomic<uint16_t> connHandle{BLE_HS_CONN_HANDLE_NONE};
   std::atomic<uint32_t> connectionGeneration{0};
+  std::atomic<uint32_t> reportsQueued{0};
+  std::atomic<uint32_t> reportsSent{0};
+  std::atomic<uint32_t> notifyFailures{0};
+  std::atomic<uint32_t> notifyStatuses{0};
+  std::atomic<uint32_t> notifyStatusErrors{0};
+  std::atomic<uint32_t> queueDrops{0};
+  std::atomic<uint32_t> reportsSuppressed{0};
+  std::atomic<uint32_t> lastReportTaskActivity{0};
+  uint32_t lastDiagnosticPrint = 0;
   QueueHandle_t reportQueue = nullptr;
 
-  static void reportTask(void* param) {
-    NimBLEKeyboard* self = (NimBLEKeyboard*)param;
-    HidAction action;
-    HidAction modifierAction{};
-    bool modifiersHeld = false;
-    uint8_t heldModifiers = 0;
+  void logEvent(const char* message) {
+    if (!logQueue) return;
+    LogEntry entry{};
+    entry.at = millis();
+    snprintf(entry.message, sizeof(entry.message), "%s", message);
+    if (xQueueSend(logQueue, &entry, 0) != pdPASS) logDrops.fetch_add(1);
+  }
 
-    auto releaseModifiers = [&]() {
-      if (!modifiersHeld) return;
-      uint8_t keyboardRelease[8] = {0};
-      self->notifyWhenReady(modifierAction, self->input,
-                            keyboardRelease, sizeof(keyboardRelease));
-      modifiersHeld = false;
-      heldModifiers = 0;
-    };
+  void logMessage(const char* format, ...) {
+    char message[256];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    logEvent(message);
+  }
 
-    while (true) {
-      TickType_t waitTicks = portMAX_DELAY;
-      if (modifiersHeld) {
-        const uint32_t idleMs = millis() - modifierAction.queuedAt;
-        if (idleMs >= VOLUME_MODIFIER_IDLE_RELEASE_MS) {
-          waitTicks = 0;
-        } else {
-          waitTicks = pdMS_TO_TICKS(VOLUME_MODIFIER_IDLE_RELEASE_MS - idleMs);
-          if (waitTicks == 0) waitTicks = 1;
-        }
-      }
-
-      if (xQueueReceive(self->reportQueue, &action, waitTicks) != pdTRUE) {
-        releaseModifiers();
-        continue;
-      }
-
-      if (!self->actionIsCurrent(action)) {
-        if (modifiersHeld &&
-            !self->reportIsReady(modifierAction, self->input)) {
-          // A reconnect will send a neutral report when macOS subscribes again.
-          modifiersHeld = false;
-          heldModifiers = 0;
-        }
-        continue;
-      }
-
-      // Never let the fine-volume modifiers affect another kind of action.
-      if (modifiersHeld &&
-          (action.modifiers == 0 || action.modifiers != heldModifiers ||
-           action.generation != modifierAction.generation)) {
-        releaseModifiers();
-        vTaskDelay(pdMS_TO_TICKS(4));
-      }
-
-      if (action.modifiers != 0) {
-        if (!modifiersHeld) {
-          uint8_t modifierReport[8] = {action.modifiers, 0, 0, 0, 0, 0, 0, 0};
-          if (!self->notifyWhenReady(action, self->input,
-                                     modifierReport, sizeof(modifierReport))) {
-            continue;
-          }
-          modifiersHeld = true;
-          heldModifiers = action.modifiers;
-          vTaskDelay(pdMS_TO_TICKS(8));
-        }
-
-        // Use the time the knob event was detected, rather than the time it
-        // happened to reach the front of the BLE queue.
-        modifierAction = action;
-      }
-
-      const bool pressSent = self->notifyWhenReady(action, action.chr, action.data, action.len);
-      if (!pressSent) {
-        if (action.modifiers != 0) releaseModifiers();
-        continue;
-      }
-
-      if (!action.releaseAfter) continue;
-
-      // Keep press and release as distinct HID reports. Once a press has been
-      // accepted, do not process another action until its release is accepted.
-      vTaskDelay(pdMS_TO_TICKS(8));
-      uint8_t release[8] = {0};
-      self->notifyWhenReady(action, action.chr, release, action.len);
-      vTaskDelay(pdMS_TO_TICKS(4));
+  void drainLogs() {
+    LogEntry entry;
+    // Bound the work so a burst of diagnostics cannot starve the UI or recovery.
+    for (int i = 0; i < 4 && xQueueReceive(logQueue, &entry, 0) == pdTRUE; ++i) {
+      Serial.printf("[%lums] %s\n", (unsigned long)entry.at, entry.message);
     }
   }
 
-  bool reportIsReady(const HidAction& action, NimBLECharacteristic* chr) const {
-    if (!connected.load() || action.generation != connectionGeneration.load()) return false;
+  void adoptConnection(const NimBLEConnInfo& info) {
+    if (!connected.load() || connHandle.load() != info.getConnHandle()) {
+      connected.store(false);
+      keyboardSubscribed.store(false);
+      consumerSubscribed.store(false);
+      connectionGeneration.fetch_add(1);
+      if (reportQueue) xQueueReset(reportQueue);
+      connHandle.store(info.getConnHandle());
+      connectedSince.store(millis());
+      encrypted.store(info.isEncrypted());
+      connected.store(true);
+    } else {
+      // Do not clear restored subscriptions or invalidate queued reports when
+      // onConnect arrives after authentication/subscription callbacks.
+      encrypted.store(info.isEncrypted());
+    }
+  }
+
+  void clearConnection() {
+    connected.store(false);
+    encrypted.store(false);
+    keyboardSubscribed.store(false);
+    consumerSubscribed.store(false);
+    connHandle.store(BLE_HS_CONN_HANDLE_NONE);
+    connectionGeneration.fetch_add(1);
+    if (reportQueue) xQueueReset(reportQueue);
+  }
+
+  void maintainConnection(uint32_t now) {
+    if (now - lastLinkCheck < BLE_LINK_CHECK_INTERVAL_MS) return;
+    lastLinkCheck = now;
+    {
+      std::lock_guard<std::mutex> lock(connectionMutex);
+      ble_gap_conn_desc desc{};
+      if (connected.load() && ble_gap_conn_find(connHandle.load(), &desc) == BLE_HS_ENOTCONN) {
+        logEvent("Connection disappeared from stack; clearing stale HID state");
+        clearConnection();
+      }
+    }
+    if (!connected.load()) {
+      auto* adv = NimBLEDevice::getAdvertising();
+      if (!adv->isAdvertising() && pServer->getConnectedCount() == 0) {
+        logEvent(adv->start() ? "Advertising recovered" : "Advertising retry failed");
+      }
+      return;
+    }
+
+    const uint16_t handle = connHandle.load();
+    const uint32_t generation = connectionGeneration.load();
+    const uint32_t age = now - connectedSince.load();
+    if (generation == recoveryGeneration.load() ||
+        (!isReady() && age >= BLE_HID_SETUP_TIMEOUT_MS)) {
+      // A link without usable HID reports must not stay silently connected.
+      // Keep the bond; let macOS reconnect and restore encryption/subscriptions.
+      recoveryGeneration.store(generation);
+      logMessage("Recovering incomplete HID link handle=%u age=%lums", handle,
+                 (unsigned long)age);
+      pServer->disconnect(handle);
+      return;
+    }
+
+    if (!encrypted.load() && age >= 1000 && securityRequestedGeneration != generation) {
+      securityRequestedGeneration = generation;
+      logEvent(NimBLEDevice::startSecurity(handle) ? "Security requested" : "Security request failed");
+    }
+
+    if (isReady() && age >= BLE_PARAM_REQUEST_DELAY_MS &&
+        paramsRequestedGeneration != generation) {
+      paramsRequestedGeneration = generation;
+      // One request per link, outside the callback, after the Mac's own initial
+      // update. 15-30 ms, zero skipped events, 6 s timeout follow Apple QA1931.
+      // The host may decline; do not keep renegotiating if it does.
+      logEvent("Requesting connection interval=15-30ms latency=0 timeout=6000ms");
+      pServer->updateConnParams(handle, 12, 24, 0, 600);
+    }
+  }
+
+  void releaseOrRecover(const HidAction& action, NimBLECharacteristic* chr,
+                        const uint8_t* data, uint8_t len) {
+    if (!notifyWhenReady(action, chr, data, len, true) && connected.load() &&
+        action.generation == connectionGeneration.load()) {
+      recoveryGeneration.store(action.generation);
+      logEvent("Key release failed; reconnect required before sending more input");
+    }
+  }
+
+  void processAction(const HidAction& action) {
+    if (!actionIsCurrent(action)) return;
+    // Expire only unstarted presses. A release must never expire or compete
+    // for queue space with new input.
+    if (action.releaseAfter && millis() - action.queuedAt > HID_ACTION_MAX_AGE_MS) {
+      queueDrops.fetch_add(1);
+      return;
+    }
+    uint8_t release[8] = {};
+    if (!action.releaseAfter) {
+      releaseOrRecover(action, action.chr, release, action.len);
+      return;
+    }
+    if (action.modifiers) {
+      uint8_t modifiers[8] = {action.modifiers, 0, 0, 0, 0, 0, 0, 0};
+      if (!notifyWhenReady(action, input, modifiers, sizeof(modifiers))) {
+        releaseOrRecover(action, input, release, 8);
+        return;
+      }
+      vTaskDelay(pdMS_TO_TICKS(HID_PHASE_MS));
+    }
+    if (notifyWhenReady(action, action.chr, action.data, action.len))
+      vTaskDelay(pdMS_TO_TICKS(HID_PHASE_MS));
+    // Even an uncertain press gets cleanup. Recovery blocks new presses but
+    // still permits releases on this connection.
+    releaseOrRecover(action, action.chr, release, action.len);
+    vTaskDelay(pdMS_TO_TICKS(HID_PHASE_MS));
+    if (action.modifiers) {
+      releaseOrRecover(action, input, release, 8);
+      vTaskDelay(pdMS_TO_TICKS(HID_PHASE_MS));
+    }
+  }
+
+  static void reportTask(void* param) {
+    auto* self = static_cast<NimBLEKeyboard*>(param);
+    HidAction action;
+    while (true) {
+      if (xQueueReceive(self->reportQueue, &action, portMAX_DELAY) == pdTRUE) {
+        self->lastReportTaskActivity.store(millis());
+        self->processAction(action);
+        self->lastReportTaskActivity.store(millis());
+      }
+    }
+  }
+
+  bool reportIsReady(const HidAction& action, NimBLECharacteristic* chr, bool releasing = false) const {
+    if (!connected.load() || !encrypted.load() ||
+        action.generation != connectionGeneration.load() ||
+        (!releasing && action.generation == recoveryGeneration.load())) return false;
     if (chr == input) return keyboardSubscribed.load();
     if (chr == consumer) return consumerSubscribed.load();
     return false;
@@ -371,12 +548,27 @@ private:
   }
 
   bool notifyWhenReady(const HidAction& action, NimBLECharacteristic* chr,
-                       const uint8_t* data, uint8_t len) {
-    while (reportIsReady(action, chr)) {
+                       const uint8_t* data, uint8_t len, bool releasing = false) {
+    const uint32_t startedAt = millis();
+    uint32_t attempts = 0;
+    while (reportIsReady(action, chr, releasing) &&
+           millis() - startedAt < BLE_NOTIFY_RETRY_TIMEOUT_MS) {
+      attempts++;
       const uint16_t handle = connHandle.load();
-      if (chr->notify(data, len, handle)) return true;
+      if (chr->notify(data, len, handle)) {
+        reportsSent.fetch_add(1);
+        return true;
+      }
       vTaskDelay(pdMS_TO_TICKS(2));
     }
+    notifyFailures.fetch_add(1);
+    logMessage("[BLE] notify rejected report=%s attempts=%lu elapsed=%lums "
+                  "connected=%u keyboard=%u consumer=%u generation=%lu/%lu",
+                  reportName(chr), (unsigned long)attempts,
+                  (unsigned long)(millis() - startedAt), connected.load(),
+                  keyboardSubscribed.load(), consumerSubscribed.load(),
+                  (unsigned long)action.generation,
+                  (unsigned long)connectionGeneration.load());
     return false;
   }
 
@@ -391,7 +583,12 @@ private:
     action.releaseAfter = true;
     action.modifiers = modifiers;
     action.queuedAt = millis();
-    xQueueSend(reportQueue, &action, 0);
+    if (xQueueSend(reportQueue, &action, 0) == pdPASS) {
+      reportsQueued.fetch_add(1);
+    } else {
+      queueDrops.fetch_add(1);
+      logMessage("[BLE] report queue full report=%s", reportName(chr));
+    }
   }
 
   void enqueueRelease(NimBLECharacteristic* chr, uint8_t len) {
@@ -401,13 +598,49 @@ private:
     action.len = len;
     action.generation = connectionGeneration.load();
     action.releaseAfter = false;
-    xQueueSendToFront(reportQueue, &action, 0);
+    if (xQueueSendToFront(reportQueue, &action, 0) == pdPASS) {
+      reportsQueued.fetch_add(1);
+    } else {
+      queueDrops.fetch_add(1);
+      logMessage("[BLE] release queue full report=%s", reportName(chr));
+      recoveryGeneration.store(action.generation);
+    }
   }
 
   void sendVolumeKey(uint16_t key) {
-    if (!connected.load() || !keyboardSubscribed.load() ||
-        !consumerSubscribed.load() || !reportQueue) return;
+    if (!isReady() || !reportQueue) {
+      reportsSuppressed.fetch_add(1);
+      return;
+    }
     uint8_t report[2] = {(uint8_t)(key & 0xFF), (uint8_t)(key >> 8)};
     enqueueAction(consumer, report, sizeof(report), MOD_LEFT_SHIFT | MOD_LEFT_ALT);
+  }
+
+  const char* reportName(NimBLECharacteristic* chr) const {
+    if (chr == input) return "keyboard";
+    if (chr == consumer) return "consumer";
+    return "unknown";
+  }
+
+  static const char* disconnectReasonText(int reason) {
+    // NimBLE's full return-code text table is optional at compile time.
+    switch (reason) {
+      case 0x208: return "connection supervision timeout";
+      case 0x213: return "remote device ended connection";
+      case 0x216: return "local host ended connection";
+      default: {
+        const char* text = NimBLEUtils::returnCodeToString(reason);
+        return text && text[0] ? text : "unknown";
+      }
+    }
+  }
+
+  void printConnectionInfo(const char* event, const NimBLEConnInfo& info) {
+    logMessage("[BLE] %s handle=%u interval=%.2fms latency=%u timeout=%ums "
+                  "bonded=%u encrypted=%u authenticated=%u heap=%u",
+                  event, info.getConnHandle(), info.getConnInterval() * 1.25f,
+                  info.getConnLatency(), info.getConnTimeout() * 10,
+                  info.isBonded(), info.isEncrypted(), info.isAuthenticated(),
+                  ESP.getFreeHeap());
   }
 };

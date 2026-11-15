@@ -5,7 +5,9 @@
 #include <Wire.h>
 #include <SimpleFOC.h>
 #include <math.h>
-#include "NimBLEKeyboard.h"
+#include "NimbleKeyboard.h"
+#include "InputFilter.h"
+#include "TouchFilter.h"
 
 // Include configurations and icons
 #include "menu_config.h"
@@ -19,7 +21,7 @@
 #define CST816S_SWIPE_THRESHOLD 40
 
 // Minimum torque. No torque if below this number
-#define MINIMUM_TORQUE  0.1
+#define MINIMUM_TORQUE  0.05
 
 // Moving ball sprite
 
@@ -62,62 +64,84 @@ const int CHOICES[] = {VOLUME_ID, MEDIA_ID, BRIGHT_ID, DISCORD_ID};
 const int N_CHOICES = 4;
 int current_menu_index = 0;
 
-unsigned long last_touch_time = 0;
-const unsigned long TOUCH_DEBOUNCE_MS = 300;
-bool touch_active = false;
-int touch_start_x = -1;
-int touch_end_x = -1;
+TouchFilter touchFilter;
+TwoWire* touchBus = nullptr;
+std::mutex sensorBusMutex;
+uint32_t touchReadErrors = 0, touchReadSuccesses = 0, touchGestures = 0;
 
 float sleep_pos = 0;
 #define WAKE_ROTATION_THRESHOLD (PI / 60.0)
 
 TaskHandle_t focTask;
+std::atomic<float> sampledAngle{0};
+std::atomic<float> requestedTorque{0};
+DetentFilter detents;
+unsigned long centeredSince = 0;
 
 void focLoop(void* param) {
   for (;;) {
-    motor.loopFOC();
+    {
+      std::lock_guard<std::mutex> lock(sensorBusMutex);
+      motor.loopFOC();
+      sampledAngle.store(encoder.getAngle());
+      motor.move(requestedTorque.load());
+    }
     vTaskDelay(1);
   }
 }
 
-uint8_t readTouchReg(uint8_t reg) {
-  Wire.beginTransmission(CST816S_ADDR);
-  Wire.write(reg);
-  Wire.endTransmission(false);
-  Wire.requestFrom(CST816S_ADDR, (uint8_t)1);
-  if (Wire.available()) return Wire.read();
-  return 0;
+bool probeTouch(TwoWire& bus, uint8_t& chip) {
+  bus.beginTransmission(CST816S_ADDR);
+  bus.write(0xA7); // CST816 chip ID
+  if (bus.endTransmission() != 0 || bus.requestFrom(CST816S_ADDR, (uint8_t)1) != 1)
+    return false;
+  chip = bus.read();
+  return true;
 }
 
-uint8_t readTouchFingers() { return readTouchReg(CST816S_FINGER_REG); }
-
-int readTouchX() {
-  uint8_t hi = readTouchReg(CST816S_X_HIGH_REG) & 0x0F;
-  uint8_t lo = readTouchReg(CST816S_X_LOW_REG);
-  return (hi << 8) | lo;
-}
-
-void dumpBleLog() {
-  if (!LittleFS.begin(false)) return;
-  fs::File f = LittleFS.open("/ble_log.txt", "r");
-  if (!f) {
-    Serial.println("No BLE log found.");
+void initTouch() {
+  uint8_t chip = 0;
+  // Earlier working firmware read touch on Wire. Detect the actual wiring
+  // rather than assuming the dedicated pin definitions match this device.
+  if (probeTouch(Wire, chip)) touchBus = &Wire;
+  else if (probeTouch(Wire1, chip)) touchBus = &Wire1;
+  if (!touchBus) {
+    Serial.println("[Touch] Controller not found on either bus");
     return;
   }
-  Serial.println("=== BLE LOG ===");
-  while (f.available()) {
-    Serial.write(f.read());
-  }
-  Serial.println("=== END LOG ===");
-  f.close();
+  // This firmware polls coordinates, so keep the CST816 awake (0xFE).
+  touchBus->beginTransmission(CST816S_ADDR);
+  touchBus->write(0xFE);
+  touchBus->write(0xFF);
+  bool awake = touchBus->endTransmission() == 0;
+  Serial.printf("[Touch] bus=%s chip=0x%02X polling_awake=%u\n",
+                touchBus == &Wire ? "Wire (21/22)" : "Wire1 (19/18)", chip, awake);
+}
+
+bool readTouchSample(uint8_t& fingers, int& x) {
+  if (!touchBus) return false;
+  // The controller may share Wire with the motor encoder. Protect the whole
+  // register-read transaction, not just each individual Wire API call.
+  std::unique_lock<std::mutex> lock(sensorBusMutex, std::defer_lock);
+  if (touchBus == &Wire) lock.lock();
+  touchBus->beginTransmission(CST816S_ADDR);
+  touchBus->write(CST816S_FINGER_REG);
+  if (touchBus->endTransmission() != 0) return false;
+  if (touchBus->requestFrom(CST816S_ADDR, (uint8_t)3) != 3) return false;
+  fingers = touchBus->read();
+  int hi = touchBus->read();
+  int lo = touchBus->read();
+  x = ((hi & 0x0F) << 8) | lo;
+  return fingers <= 1 && (fingers == 0 || x < SCREEN_SIZE);
 }
 
 void setup() {
   Serial.begin(115200);
-  //delay(500); // give Serial monitor time to connect
-  //dumpBleLog();
-
-  bleKeyboard.begin("Haptic Knob");
+  delay(500); // give Serial monitor time to connect
+  if (!bleKeyboard.begin("Haptic Knob")) {
+    Serial.println("BLE initialization failed");
+    while (true) delay(1000);
+  }
 
   // Set blacklight pins
   pinMode(BLK_PIN, OUTPUT);
@@ -144,11 +168,12 @@ void setup() {
 
   pinMode(TP_RST, OUTPUT);
   digitalWrite(TP_RST, LOW);
-  delay(10);
+  delay(20);
   digitalWrite(TP_RST, HIGH);
-  delay(50);
+  delay(100);
   pinMode(TP_INT, INPUT);
   Wire1.begin(TP_SDA, TP_SCL);
+  initTouch();
 
   driver.voltage_power_supply = 12.0;
   driver.init();
@@ -160,10 +185,12 @@ void setup() {
   motor.init();
   motor.initFOC();
 
+  sampledAngle.store(encoder.getAngle());
   xTaskCreatePinnedToCore(focLoop, "FOC", 4096, NULL, 1, &focTask, 1);
 
-  while (!bleKeyboard.isConnected()) {
-    delay(500);
+  while (!bleKeyboard.isReady()) {
+    bleKeyboard.poll();
+    delay(10);
   }
 
   Serial.println("BLE connected, starting UI");
@@ -184,54 +211,61 @@ void swipeToMenu(int direction) {
 }
 
 void handleTouchRevised() {
-  unsigned long now = millis();
-  uint8_t fingers = readTouchFingers();
-
-  if (fingers >= 1) {
-    int x = readTouchX();
-    if (!touch_active) { touch_active = true; touch_start_x = x; }
-    touch_end_x = x;
-  } else {
-    if (touch_active) {
-      touch_active = false;
-      if (now - last_touch_time < TOUCH_DEBOUNCE_MS) return;
-      last_touch_time = now;
-
-      if (!display_status) {
-        setDisplay(true);
-        last_activity = now;
-        return;
-      }
-
-      int dx = touch_end_x - touch_start_x;
-      if      (dx >  CST816S_SWIPE_THRESHOLD) swipeToMenu(+1);
-      else if (dx < -CST816S_SWIPE_THRESHOLD) swipeToMenu(-1);
-      else { doTapAction(); last_activity = now; }
-    }
+  const uint32_t now = millis();
+  uint8_t fingers = 0;
+  int x = 0;
+  const bool valid = readTouchSample(fingers, x);
+  if (valid) ++touchReadSuccesses;
+  else ++touchReadErrors;
+  auto gesture = touchFilter.update(valid, fingers, x, now);
+  static uint32_t lastDiagnostic = 0;
+  if (now - lastDiagnostic >= 15000) {
+    lastDiagnostic = now;
+    Serial.printf("[Touch] reads=%lu errors=%lu gestures=%lu\n",
+                  (unsigned long)touchReadSuccesses, (unsigned long)touchReadErrors,
+                  (unsigned long)touchGestures);
   }
+  if (gesture == TouchFilter::None) return;
+  ++touchGestures;
+  Serial.printf("[Touch] gesture=%u\n", static_cast<unsigned>(gesture));
+  if (!display_status) {
+    setDisplay(true);
+    last_activity = now;
+    return;
+  }
+  if (gesture == TouchFilter::SwipeRight) swipeToMenu(+1);
+  else if (gesture == TouchFilter::SwipeLeft) swipeToMenu(-1);
+  else { doTapAction(); last_activity = now; }
 }
 
 void loop() {
+  bleKeyboard.poll();
   handleTouchRevised();
 
   if (new_ui_id != current_ui_id) {
+    bleKeyboard.cancelPendingInputs();
     drawUI(new_ui_id);
     take_input = false;
+    centeredSince = 0;
   }
 
-  float pos = encoder.getAngle();
+  float pos = sampledAngle.load();
   int choice = calc_choice(pos);
 
   if (take_input) {
-    motor.move(calc_torque(pos));
+    requestedTorque.store(calc_torque(pos));
   } else {
     float target_angle = 0;
     if (current_ui_id == DISCORD_ID) target_angle = discord_choice * 2 * PI / 3;
-    motor.move(torque_to_angle(pos, target_angle));
+    requestedTorque.store(torque_to_angle(pos, target_angle));
     if (abs(((target_angle - PI / 2) - pos)) < 0.05) {
-      take_input = true;
-      current_choice = choice;
-    }
+      if (centeredSince == 0) centeredSince = millis();
+      if (millis() - centeredSince >= 150) {
+        take_input = true;
+        detents.reset(pos, n_lines);
+        current_choice = choice;
+      }
+    } else centeredSince = 0;
   }
 
   if (pos != currentPos) {
@@ -243,10 +277,11 @@ void loop() {
 
     drawBall(currentPos, pos);
 
-    int new_choice = calc_choice(pos);
+    int direction = take_input ? detents.update(pos) : 0;
+    int new_choice = detents.choice();
 
-    if (new_choice != current_choice && take_input) {
-      if (pos > currentPos) {
+    if (direction != 0 && take_input) {
+      if (direction > 0) {
         if      (current_ui_id == VOLUME_ID)  bleKeyboard.volumeUp();
         else if (current_ui_id == MEDIA_ID)   bleKeyboard.nextTrack();
         else if (current_ui_id == BRIGHT_ID)  bleKeyboard.pressF15();
@@ -262,7 +297,7 @@ void loop() {
         } else if (new_choice == 1 && current_choice == 0) {
           bleKeyboard.pressF13();
         } else if (new_choice == 2 && current_choice == 0) {
-          bleKeyboard.pressF13(); delay(20); bleKeyboard.pressAltF13();
+          bleKeyboard.pressF13(); bleKeyboard.pressAltF13();
         } else {
           bleKeyboard.pressAltF13();
         }
@@ -398,6 +433,6 @@ void drawBall(float posOld, float posNew) {
 
 void setDisplay(bool onoff) {
   display_status = onoff;
-  if (!onoff) sleep_pos = encoder.getAngle();
+  if (!onoff) sleep_pos = sampledAngle.load();
   digitalWrite(BLK_PIN, onoff ? HIGH : LOW);
 }
